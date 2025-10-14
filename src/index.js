@@ -80,47 +80,138 @@ async function connectToWhatsApp() {
             if (!msg.key.fromMe && msg.message) {
                 const contact = msg.key.remoteJid; // Quién envió el mensaje
 
+                // Extraer el contenido real del mensaje
+                // A veces los mensajes vienen envueltos en viewOnceMessage, ephemeralMessage, etc.
+                let actualMessage = msg.message;
+                
+                // Desempaquetar mensajes especiales
+                if (msg.message.viewOnceMessage) {
+                    actualMessage = msg.message.viewOnceMessage.message;
+                }
+                if (msg.message.ephemeralMessage) {
+                    actualMessage = msg.message.ephemeralMessage.message;
+                }
+                if (msg.message.viewOnceMessageV2) {
+                    actualMessage = msg.message.viewOnceMessageV2.message;
+                }
+                if (msg.message.documentWithCaptionMessage) {
+                    actualMessage = msg.message.documentWithCaptionMessage.message;
+                }
+
+                // Ignorar mensajes del sistema/protocolo (borrar mensaje, editar, etc.)
+                if (actualMessage.protocolMessage) {
+                    console.log('🔇 Mensaje del sistema ignorado (protocolMessage)');
+                    continue; // Saltar este mensaje
+                }
+
                 // Extraer texto o caption
                 let body = '';
                 let messageType = 'text';
 
-                if (msg.message.conversation) {
-                    body = msg.message.conversation;
-                } else if (msg.message.extendedTextMessage?.text) {
-                    body = msg.message.extendedTextMessage.text;
-                } else if (msg.message.imageMessage?.caption) {
-                    body = msg.message.imageMessage.caption;
+                // Texto simple
+                if (actualMessage.conversation) {
+                    body = actualMessage.conversation;
+                    messageType = 'text';
+                }
+                // Texto extendido (con formato, enlaces, respuestas, etc.)
+                else if (actualMessage.extendedTextMessage?.text) {
+                    body = actualMessage.extendedTextMessage.text;
+                    messageType = 'text';
+                }
+                // Imagen
+                else if (actualMessage.imageMessage) {
+                    body = actualMessage.imageMessage.caption || '[Imagen recibida]';
                     messageType = 'image';
-                } else if (msg.message.videoMessage?.caption) {
-                    body = msg.message.videoMessage.caption;
+                }
+                // Video
+                else if (actualMessage.videoMessage) {
+                    body = actualMessage.videoMessage.caption || '[Video recibido]';
                     messageType = 'video';
-                } else if (msg.message.documentMessage?.caption) {
-                    body = msg.message.documentMessage.caption;
-                    messageType = 'document';
-                } else if (msg.message.audioMessage) {
-                    body = '[Audio recibido]';
+                }
+                // Audio
+                else if (actualMessage.audioMessage) {
+                    const seconds = actualMessage.audioMessage.seconds || 0;
+                    body = `[Audio recibido - ${seconds}s]`;
                     messageType = 'audio';
-                } else if (msg.message.stickerMessage) {
+                }
+                // Nota de voz (PTT - Push To Talk)
+                else if (actualMessage.audioMessage?.ptt) {
+                    const seconds = actualMessage.audioMessage.seconds || 0;
+                    body = `[Nota de voz - ${seconds}s]`;
+                    messageType = 'ptt';
+                }
+                // Documento
+                else if (actualMessage.documentMessage) {
+                    const fileName = actualMessage.documentMessage.fileName || 'sin nombre';
+                    const caption = actualMessage.documentMessage.caption || '';
+                    body = caption ? `${caption} [Documento: ${fileName}]` : `[Documento: ${fileName}]`;
+                    messageType = 'document';
+                }
+                // Sticker
+                else if (actualMessage.stickerMessage) {
                     body = '[Sticker recibido]';
                     messageType = 'sticker';
-                } else if (
-                    msg.message.imageMessage ||
-                    msg.message.videoMessage ||
-                    msg.message.documentMessage
-                ) {
-                    // Archivo sin caption
-                    if (msg.message.imageMessage) {
-                        body = '[Imagen recibida]';
-                        messageType = 'image';
-                    } else if (msg.message.videoMessage) {
-                        body = '[Video recibido]';
-                        messageType = 'video';
-                    } else if (msg.message.documentMessage) {
-                        body = `[Documento: ${msg.message.documentMessage.fileName || 'sin nombre'}]`;
-                        messageType = 'document';
-                    }
-                } else {
+                }
+                // Contacto
+                else if (actualMessage.contactMessage) {
+                    const contactName = actualMessage.contactMessage.displayName || 'Desconocido';
+                    body = `[Contacto compartido: ${contactName}]`;
+                    messageType = 'contact';
+                }
+                // Ubicación
+                else if (actualMessage.locationMessage) {
+                    const lat = actualMessage.locationMessage.degreesLatitude;
+                    const lng = actualMessage.locationMessage.degreesLongitude;
+                    body = `[Ubicación: ${lat}, ${lng}]`;
+                    messageType = 'location';
+                }
+                // Ubicación en vivo
+                else if (actualMessage.liveLocationMessage) {
+                    body = '[Ubicación en vivo compartida]';
+                    messageType = 'liveLocation';
+                }
+                // Reacción a mensaje
+                else if (actualMessage.reactionMessage) {
+                    const emoji = actualMessage.reactionMessage.text || '👍';
+                    body = `[Reacción: ${emoji}]`;
+                    messageType = 'reaction';
+                }
+                // Mensaje de producto/catálogo
+                else if (actualMessage.productMessage) {
+                    body = '[Producto compartido]';
+                    messageType = 'product';
+                }
+                // Lista de opciones
+                else if (actualMessage.listMessage) {
+                    body = actualMessage.listMessage.description || '[Lista de opciones]';
+                    messageType = 'list';
+                }
+                // Botones
+                else if (actualMessage.buttonsMessage) {
+                    body = actualMessage.buttonsMessage.contentText || '[Mensaje con botones]';
+                    messageType = 'buttons';
+                }
+                // Plantilla con botones
+                else if (actualMessage.templateMessage) {
+                    body = '[Mensaje de plantilla]';
+                    messageType = 'template';
+                }
+                // GIF
+                else if (actualMessage.videoMessage?.gifPlayback) {
+                    body = actualMessage.videoMessage.caption || '[GIF recibido]';
+                    messageType = 'gif';
+                }
+                // Mensaje de llamada
+                else if (actualMessage.call) {
+                    body = '[Llamada entrante]';
+                    messageType = 'call';
+                }
+                // Si no se reconoce el tipo
+                else {
+                    // Log para debug
+                    console.log('⚠️  Tipo de mensaje no reconocido:', Object.keys(actualMessage));
                     body = '[Mensaje no soportado]';
+                    messageType = 'unsupported';
                 }
 
                 const messageObj = {
@@ -128,11 +219,12 @@ async function connectToWhatsApp() {
                     from: contact,
                     body: body,
                     timestamp: msg.messageTimestamp?.toString() || Date.now().toString(),
-                    type: messageType
+                    type: messageType,
+                    read: false // Nuevo campo para marcar si fue leído
                 };
 
                 incomingMessages.push(messageObj);
-                console.log(`📩 Nuevo mensaje de ${contact}: ${body}`);
+                console.log(`📩 Nuevo mensaje de ${contact} [${messageType}]: ${body}`);
             }
         }
     });
@@ -278,16 +370,120 @@ app.post('/send-all', express.json({ limit: '10mb' }), async (req, res) => {
 
 // Endpoint para obtener mensajes entrantes
 app.get('/messages', (req, res) => {
+    const { unreadOnly } = req.query;
+    
+    let messages = incomingMessages;
+    
+    // Filtrar solo no leídos si se solicita
+    if (unreadOnly === 'true') {
+        messages = incomingMessages.filter(msg => !msg.read);
+    }
+    
     res.json({
-        count: incomingMessages.length,
-        messages: incomingMessages
+        count: messages.length,
+        total: incomingMessages.length,
+        unread: incomingMessages.filter(msg => !msg.read).length,
+        messages: messages
     });
 });
 
-// Opcional: endpoint para limpiar
+// Endpoint para marcar mensajes como leídos
+app.post('/messages/mark-read', express.json(), (req, res) => {
+    const { messageIds } = req.body;
+    
+    if (!messageIds || !Array.isArray(messageIds)) {
+        return res.status(400).json({ 
+            error: 'Se requiere un array de messageIds' 
+        });
+    }
+    
+    let marked = 0;
+    messageIds.forEach(id => {
+        const msg = incomingMessages.find(m => m.id === id);
+        if (msg && !msg.read) {
+            msg.read = true;
+            marked++;
+        }
+    });
+    
+    res.json({ 
+        success: true, 
+        marked: marked,
+        message: `${marked} mensaje(s) marcado(s) como leído(s)` 
+    });
+});
+
+// Endpoint para responder a un mensaje específico
+app.post('/messages/reply', express.json(), async (req, res) => {
+    const { messageId, message } = req.body;
+    
+    if (!messageId || !message) {
+        return res.status(400).json({ 
+            error: 'Se requiere messageId y message' 
+        });
+    }
+    
+    if (connectionStatus !== 'connected') {
+        return res.status(503).json({ error: 'WhatsApp no está conectado' });
+    }
+    
+    // Buscar el mensaje original
+    const originalMsg = incomingMessages.find(m => m.id === messageId);
+    if (!originalMsg) {
+        return res.status(404).json({ error: 'Mensaje no encontrado' });
+    }
+    
+    try {
+        // Enviar respuesta al remitente
+        await sock.sendMessage(originalMsg.from, { text: message });
+        
+        // Marcar como leído
+        originalMsg.read = true;
+        
+        console.log(`✅ Respuesta enviada a ${originalMsg.from}`);
+        
+        res.json({ 
+            success: true, 
+            to: originalMsg.from,
+            originalMessage: originalMsg.body,
+            reply: message 
+        });
+        
+    } catch (error) {
+        console.error('Error al responder mensaje:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Endpoint para limpiar mensajes leídos
+app.delete('/messages/read', (req, res) => {
+    const beforeCount = incomingMessages.length;
+    const readMessages = incomingMessages.filter(msg => msg.read);
+    
+    // Eliminar mensajes leídos
+    for (let i = incomingMessages.length - 1; i >= 0; i--) {
+        if (incomingMessages[i].read) {
+            incomingMessages.splice(i, 1);
+        }
+    }
+    
+    res.json({ 
+        success: true, 
+        deleted: readMessages.length,
+        remaining: incomingMessages.length,
+        message: `${readMessages.length} mensaje(s) leído(s) eliminado(s)` 
+    });
+});
+
+// Endpoint para limpiar todos los mensajes
 app.delete('/messages', (req, res) => {
+    const count = incomingMessages.length;
     incomingMessages.length = 0;
-    res.json({ success: true, message: 'Mensajes limpiados' });
+    res.json({ 
+        success: true, 
+        deleted: count,
+        message: 'Todos los mensajes eliminados' 
+    });
 });
 
 // Iniciar

@@ -10,12 +10,15 @@ Una API REST sencilla para enviar y recibir mensajes de WhatsApp usando **[Baile
 
 - ✅ Autenticación con código QR (una sola vez, gracias a la persistencia)
 - ✅ Envío de mensajes de texto, imágenes, videos, documentos y audio
-- ✅ Recepción y registro de mensajes entrantes
+- ✅ Recepción y registro de mensajes entrantes con estado de lectura
+- ✅ Sistema de gestión de mensajes (leídos/no leídos)
+- ✅ Responder a mensajes específicos
+- ✅ Soporte para múltiples tipos de mensajes (texto, imagen, video, audio, documentos, ubicaciones, contactos, stickers, etc.)
 - ✅ API REST para integrar con otros servicios
 - ✅ Persistencia de sesión entre reinicios del contenedor
 - ✅ Soporte para Node.js 20+ y Docker
 - ✅ Logs detallados para depuración
-- ✅ Endpoint seguro para cerrar sesión
+- ✅ Endpoint seguro para cerrar sesión y reconexión
 
 ---
 
@@ -86,15 +89,75 @@ POST /send-all
 
 ```http
 GET /messages
+GET /messages?unreadOnly=true
 ```
 
-Devuelve todos los mensajes recibidos.
+**Respuesta:**
+```json
+{
+  "count": 3,
+  "total": 5,
+  "unread": 3,
+  "messages": [
+    {
+      "id": "ABC123",
+      "from": "593995707647@s.whatsapp.net",
+      "body": "Hola, cómo estás?",
+      "timestamp": "1760477803",
+      "type": "text",
+      "read": false
+    }
+  ]
+}
+```
 
-### 🧹 Limpiar mensajes entrantes
+**Query params:**
+- `unreadOnly=true` (opcional): Devuelve solo mensajes no leídos
+
+### 💬 Responder a un mensaje
+
+```http
+POST /messages/reply
+```
+
+**Cuerpo (JSON):**
+```json
+{
+  "messageId": "ABC123",
+  "message": "Hola! Estoy bien, gracias"
+}
+```
+
+Responde a un mensaje específico y lo marca automáticamente como leído.
+
+### ✅ Marcar mensajes como leídos
+
+```http
+POST /messages/mark-read
+```
+
+**Cuerpo (JSON):**
+```json
+{
+  "messageIds": ["ABC123", "DEF456"]
+}
+```
+
+### 🗑️ Eliminar mensajes leídos
+
+```http
+DELETE /messages/read
+```
+
+Elimina todos los mensajes que han sido marcados como leídos.
+
+### 🧹 Limpiar todos los mensajes
 
 ```http
 DELETE /messages
 ```
+
+Elimina todos los mensajes (leídos y no leídos).
 
 ### 📊 Estado de conexión
 
@@ -132,8 +195,49 @@ Cierra la sesión actual y genera un nuevo QR para reconexión.
 ## 🗃️ Persistencia
 
 - Las credenciales de WhatsApp se guardan en `./session/` (gracias al volumen de Docker)
-- Los mensajes entrantes se almacenan en memoria (se pierden al reiniciar)
+- Los mensajes entrantes se almacenan en memoria con estado de lectura (se pierden al reiniciar)
 - La sesión persiste entre reinicios del contenedor
+- Estado de mensajes (leído/no leído) se mantiene durante la ejecución
+
+---
+
+## 📨 Tipos de mensajes soportados
+
+La API puede recibir y procesar los siguientes tipos de mensajes:
+
+- ✅ **Texto** - Mensajes de texto simple y con formato
+- ✅ **Imágenes** - Con o sin caption
+- ✅ **Videos** - Con o sin caption
+- ✅ **Audio** - Archivos de audio y notas de voz
+- ✅ **Documentos** - PDFs, Word, Excel, etc.
+- ✅ **Stickers** - Stickers animados y estáticos
+- ✅ **Contactos** - Contactos compartidos
+- ✅ **Ubicaciones** - Ubicaciones estáticas y en vivo
+- ✅ **GIFs** - GIFs animados
+- ✅ **Reacciones** - Emojis de reacción a mensajes
+- ⚠️ **Listas y botones** - Soporte básico
+- 🔇 **Mensajes del sistema** - Ignorados automáticamente (mensajes eliminados, editados, etc.)
+
+---
+
+## 🔄 Flujo de trabajo recomendado
+
+1. **Consultar mensajes nuevos:**
+   ```bash
+   curl http://localhost:3080/messages?unreadOnly=true
+   ```
+
+2. **Procesar y responder:**
+   ```bash
+   curl -X POST http://localhost:3080/messages/reply \
+     -H "Content-Type: application/json" \
+     -d '{"messageId": "ABC123", "message": "Tu respuesta"}'
+   ```
+
+3. **Limpiar mensajes procesados:**
+   ```bash
+   curl -X DELETE http://localhost:3080/messages/read
+   ```
 
 ---
 
@@ -158,6 +262,39 @@ curl -X POST http://localhost:3080/send-all \
     "media": "https://picsum.photos/200",
     "mediaType": "image"
   }'
+```
+
+### Obtener mensajes no leídos
+
+```bash
+curl http://localhost:3080/messages?unreadOnly=true
+```
+
+### Responder a un mensaje
+
+```bash
+curl -X POST http://localhost:3080/messages/reply \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messageId": "ABC123",
+    "message": "Gracias por tu mensaje!"
+  }'
+```
+
+### Marcar mensajes como leídos
+
+```bash
+curl -X POST http://localhost:3080/messages/mark-read \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messageIds": ["ABC123", "DEF456"]
+  }'
+```
+
+### Eliminar mensajes leídos
+
+```bash
+curl -X DELETE http://localhost:3080/messages/read
 ```
 
 ### Verificar estado
@@ -214,8 +351,9 @@ environment:
 - Los mensajes enviados muestran una advertencia en el chat:
   *"Este mensaje no desaparecerá del chat. Es posible que el remitente tenga una versión desactualizada de WhatsApp."*
   → Esto es normal al usar clientes no oficiales.
-- No soporta mensajes efímeros, encuestas, ubicaciones, etc.
+- Los mensajes en memoria se pierden al reiniciar el contenedor
 - La sesión expira si no se usa en ~21 días
+- Soporte limitado para encuestas y algunas funciones avanzadas
 
 ---
 
@@ -224,27 +362,4 @@ environment:
 Este proyecto es de código abierto bajo la licencia MIT.
 
 **Baileys** es mantenido por la comunidad y no está afiliado a WhatsApp Inc.
-
----
-
-## 🌟 Características
-
-- ✅ Autenticación con código QR (una sola vez, gracias a la persistencia)
-- ✅ Envío de mensajes de texto, imágenes, videos, documentos y audio
-- ✅ Recepción y registro de mensajes entrantes
-- ✅ Respuesta automática (eco-bot básico)
-- ✅ API REST para integrar con otros servicios
-- ✅ Persistencia de sesión entre reinicios del contenedor
-- ✅ Soporte para Node.js 20+ y Docker
-- ✅ Logs detallados para depuración
-
----
-
-## 🛠️ Requisitos
-
-- [Docker](https://www.docker.com/)
-- [Docker Compose](https://docs.docker.com/compose/)
-- Node.js 20+ (solo para desarrollo local, no necesario en producción)
-
----
 
