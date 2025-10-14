@@ -1,0 +1,15 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  whatsapp-api:
+    build: .
+    ports:
+      - "3080:8080" # puerto HTTP externo: 3080 , interno: 8080
+    volumes:
+      - ./session:/app/session  # Persistencia de credenciales
+    environment:
+      - NODE_ENV=production
+      - SESSION_DIR=/app/session
+      - LOGOUT_SECRET=${LOGOUT_SECRET}
+    restart: unless-stopped
