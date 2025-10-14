@@ -300,7 +300,6 @@ app.listen(PORT, '0.0.0.0', () => {
 // Endpoint para cerrar sesión
 app.post('/logout', express.json(), async (req, res) => {
     console.log('Solicitud de cierre de sesión recibida');
-    console.log('Secret:', process.env.LOGOUT_SECRET);
     
     // Verificar si la variable de entorno está configurada
     if (!process.env.LOGOUT_SECRET) {
@@ -317,39 +316,69 @@ app.post('/logout', express.json(), async (req, res) => {
             error: 'Se requiere el campo "secret" en el body de la petición' 
         });
     }
-
-    console.log('Secreto recibido:', secret);
     
     if (secret !== process.env.LOGOUT_SECRET) {
         return res.status(403).json({ error: 'Secreto inválido' });
     }
     try {
-        // 1. Cerrar conexión actual si existe
-        if (sock) {
-            await sock.logout(); // Esto invalida la sesión en WhatsApp
-            sock = null;
+        // 1. Intentar cerrar conexión solo si está conectada
+        if (sock && connectionStatus === 'connected') {
+            try {
+                await sock.logout();
+                console.log('✅ Conexión cerrada correctamente en WhatsApp');
+            } catch (logoutError) {
+                console.log('⚠️  Conexión ya cerrada o error al notificar a WhatsApp:', logoutError.message);
+            }
         }
-
-        // 2. Limpiar el directorio de sesión
-        clearSessionDir();
-
-        // 3. Reiniciar conexión → generará nuevo QR
-        setTimeout(() => {
-            connectToWhatsApp().catch(console.error);
-        }, 1000);
-
-        // 4. Resetear estado local
+        
+        // 2. Siempre limpiar referencias y estado local
+        sock = null;
         qrCode = null;
         connectionStatus = 'disconnected';
         incomingMessages.length = 0;
+        console.log('🧹 Estado local limpiado');
 
-        res.json({ success: true, message: 'Sesión cerrada. Escanea el nuevo QR en /qr' });
+        // 3. Limpiar archivos de sesión
+        clearSessionDir();
+
+        // 4. Reiniciar conexión para generar nuevo QR
+        setTimeout(() => {
+            console.log('� Iniciando nueva conexión...');
+            connectToWhatsApp().catch(console.error);
+        }, 2000);
+
+        res.json({ 
+            success: true, 
+            message: 'Sesión cerrada y reiniciada. Nuevo QR disponible en /qr en 3-5 segundos' 
+        });
+
     } catch (error) {
-        console.error('Error al cerrar sesión:', error);
-        res.status(500).json({ error: 'No se pudo cerrar la sesión' });
+        console.error('❌ Error al cerrar sesión:', error);
+        
+        // Forzar limpieza aunque haya error
+        sock = null;
+        qrCode = null;
+        connectionStatus = 'disconnected';
+        incomingMessages.length = 0;
+        
+        try {
+            clearSessionDir();
+        } catch (clearError) {
+            console.error('❌ Error al limpiar archivos:', clearError.message);
+        }
+        
+        // Reintentar conexión
+        setTimeout(() => {
+            console.log('🔄 Reintentando conexión después del error...');
+            connectToWhatsApp().catch(console.error);
+        }, 2000);
+        
+        res.json({ 
+            success: true, 
+            message: 'Sesión forzada a reiniciar. Nuevo QR disponible en /qr en unos segundos' 
+        });
     }
 });
-
 
 // Función para limpiar el directorio de sesión
 function clearSessionDir() {
