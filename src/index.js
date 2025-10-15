@@ -18,6 +18,12 @@ const SESSION_DIR = process.env.SESSION_DIR || './session';
 const incomingMessages = [];
 const { unlinkSync, readdirSync } = require('fs');
 
+// 
+// Importar el sistema de menús
+//const menuHandler = require('./menuHandler');
+
+// SGIA - Sistema de IA
+const { queryAI } = require('./SGIA');
 
 // Asegurar que el directorio de sesión exista
 if (!fs.existsSync(SESSION_DIR)) {
@@ -225,6 +231,26 @@ async function connectToWhatsApp() {
 
                 incomingMessages.push(messageObj);
                 console.log(`📩 Nuevo mensaje de ${contact} [${messageType}]: ${body}`);
+                
+                // Sistema de respuesta automática con IA (solo para mensajes de texto)
+                if (messageType === 'text' && body && !body.startsWith('[')) {
+                    try {
+                        // Consultar a la IA con el mensaje del usuario
+                        const aiResponse = await queryAI(body, contact);
+                        
+                        if (aiResponse) {
+                            // Enviar la respuesta de la IA al usuario
+                            await sock.sendMessage(contact, { text: aiResponse });
+                            console.log(`🤖 Respuesta de IA enviada a ${contact}`);
+                        }
+                    } catch (aiError) {
+                        console.error('⚠️  Error en sistema de IA:', aiError.message);
+                        // Opcional: enviar mensaje de error al usuario
+                        // await sock.sendMessage(contact, { 
+                        //     text: 'Lo siento, estoy teniendo problemas técnicos. Intenta más tarde.' 
+                        // });
+                    }
+                }
             }
         }
     });
@@ -483,6 +509,95 @@ app.delete('/messages', (req, res) => {
         success: true, 
         deleted: count,
         message: 'Todos los mensajes eliminados' 
+    });
+});
+
+// ======= ENDPOINTS DEL SISTEMA DE MENÚS =======
+
+// Endpoint para iniciar un menú manualmente
+app.post('/menu/start', express.json(), async (req, res) => {
+    const { to, menuId = 'MAIN' } = req.body;
+    
+    if (!to) {
+        return res.status(400).json({ error: 'Se requiere el campo "to"' });
+    }
+    
+    if (connectionStatus !== 'connected') {
+        return res.status(503).json({ error: 'WhatsApp no está conectado' });
+    }
+    
+    try {
+        const jid = to.endsWith('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
+        const menuMessage = menuHandler.startMenu(jid, menuId);
+        
+        if (!menuMessage) {
+            return res.status(404).json({ error: 'Menú no encontrado' });
+        }
+        
+        await sock.sendMessage(jid, { text: menuMessage });
+        
+        res.json({
+            success: true,
+            to: jid,
+            menuId,
+            message: 'Menú iniciado correctamente'
+        });
+    } catch (error) {
+        console.error('Error al iniciar menú:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Endpoint para obtener menús disponibles
+app.get('/menu/list', (req, res) => {
+    const menus = Object.keys(menuHandler.MENUS).map(key => {
+        const menu = menuHandler.MENUS[key];
+        return {
+            id: menu.id,
+            title: menu.title,
+            options: Object.keys(menu.options).length
+        };
+    });
+    
+    res.json({
+        count: menus.length,
+        menus
+    });
+});
+
+// Endpoint para obtener estado del menú de un usuario
+app.get('/menu/status/:phoneNumber', (req, res) => {
+    const { phoneNumber } = req.params;
+    const jid = phoneNumber.endsWith('@s.whatsapp.net') 
+        ? phoneNumber 
+        : `${phoneNumber}@s.whatsapp.net`;
+    
+    const isActive = menuHandler.isInActiveMenu(jid);
+    const currentMenu = menuHandler.getCurrentMenu(jid);
+    
+    res.json({
+        phoneNumber,
+        isActive,
+        currentMenu: currentMenu ? {
+            id: currentMenu.id,
+            title: currentMenu.title
+        } : null
+    });
+});
+
+// Endpoint para limpiar estado del menú de un usuario
+app.delete('/menu/clear/:phoneNumber', (req, res) => {
+    const { phoneNumber } = req.params;
+    const jid = phoneNumber.endsWith('@s.whatsapp.net') 
+        ? phoneNumber 
+        : `${phoneNumber}@s.whatsapp.net`;
+    
+    menuHandler.clearConversationState(jid);
+    
+    res.json({
+        success: true,
+        message: 'Estado del menú limpiado',
+        phoneNumber
     });
 });
 

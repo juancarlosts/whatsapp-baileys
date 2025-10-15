@@ -13,6 +13,8 @@ Una API REST sencilla para enviar y recibir mensajes de WhatsApp usando **[Baile
 - ✅ Recepción y registro de mensajes entrantes con estado de lectura
 - ✅ Sistema de gestión de mensajes (leídos/no leídos)
 - ✅ Responder a mensajes específicos
+- ✅ **Sistema de respuestas automáticas con IA (SGIA)** 🤖✨
+- ✅ Integración con API Dify para chatbot inteligente
 - ✅ Soporte para múltiples tipos de mensajes (texto, imagen, video, audio, documentos, ubicaciones, contactos, stickers, etc.)
 - ✅ API REST para integrar con otros servicios
 - ✅ Persistencia de sesión entre reinicios del contenedor
@@ -189,6 +191,49 @@ POST /logout
 ```
 
 Cierra la sesión actual y genera un nuevo QR para reconexión.
+
+---
+
+## 🎯 Sistema de Menús Interactivos
+
+La API incluye un sistema de menús automático para interacción con usuarios. Ver documentación completa en [MENUS.md](MENUS.md).
+
+### Iniciar menú manualmente
+
+```http
+POST /menu/start
+```
+
+**Cuerpo (JSON):**
+```json
+{
+  "to": "593995707647",
+  "menuId": "MAIN"
+}
+```
+
+### Listar menús disponibles
+
+```http
+GET /menu/list
+```
+
+### Ver estado del menú de un usuario
+
+```http
+GET /menu/status/593995707647
+```
+
+### Limpiar estado del menú
+
+```http
+DELETE /menu/clear/593995707647
+```
+
+**Uso automático:**
+- Usuario escribe "Hola" → Menú de bienvenida
+- Usuario escribe "Menú" → Menú principal
+- Usuario en menú activo → Procesa opciones (1, 2, 3, etc.)
 
 ---
 
