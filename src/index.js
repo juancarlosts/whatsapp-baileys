@@ -241,6 +241,7 @@ async function connectToWhatsApp() {
                         if (aiResponse) {
                             // Enviar la respuesta de la IA al usuario
                             await sock.sendMessage(contact, { text: aiResponse });
+                            await sock.readMessages([msg.key]); // Marcar como leído después de responder
                             console.log(`🤖 Respuesta de IA enviada a ${contact}`);
                         }
                     } catch (aiError) {
