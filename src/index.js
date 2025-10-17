@@ -18,12 +18,11 @@ const SESSION_DIR = process.env.SESSION_DIR || './session';
 const incomingMessages = [];
 const { unlinkSync, readdirSync } = require('fs');
 
-// 
 // Importar el sistema de menús
 //const menuHandler = require('./menuHandler');
 
-// SGIA - Sistema de IA
-const { queryAI } = require('./SGIA');
+// Importar el sistema de menús
+const menuHandler = require('./menuHandlerPersona');
 
 // Asegurar que el directorio de sesión exista
 if (!fs.existsSync(SESSION_DIR)) {
@@ -49,6 +48,8 @@ async function connectToWhatsApp() {
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
+
+        console.log('🔄 Estado de conexión actualizado:', update);
 
         if (qr) {
             qrCode = qr;
@@ -232,24 +233,52 @@ async function connectToWhatsApp() {
                 incomingMessages.push(messageObj);
                 console.log(`📩 Nuevo mensaje de ${contact} [${messageType}]: ${body}`);
                 
-                // Sistema de respuesta automática con IA (solo para mensajes de texto)
+                // Sistema de respuesta automática con menús (solo para mensajes de texto)
                 if (messageType === 'text' && body && !body.startsWith('[')) {
                     try {
-                        // Consultar a la IA con el mensaje del usuario
-                        const aiResponse = await queryAI(body, contact);
+                        // Procesar el mensaje con el sistema de menús (AWAIT porque es async)
+                        const menuResponse = await menuHandler.processUserResponse(contact, body);
                         
-                        if (aiResponse) {
-                            // Enviar la respuesta de la IA al usuario
-                            await sock.sendMessage(contact, { text: aiResponse });
+                        if (menuResponse) {
+                            // Verificar si la respuesta incluye una foto
+                            if (typeof menuResponse === 'object' && menuResponse.mensaje) {
+                                // Si hay foto, enviar primero la foto con el mensaje como caption
+                                if (menuResponse.photo) {
+                                    try {
+                                        console.log(`📸 Enviando foto desde: ${menuResponse.photo}`);
+                                        const imageResponse = await fetch(menuResponse.photo);
+                                        if (imageResponse.ok) {
+                                            const imageBuffer = await imageResponse.buffer();
+                                            await sock.sendMessage(contact, {
+                                                image: imageBuffer,
+                                                caption: menuResponse.mensaje
+                                            });
+                                            console.log(`📸 Foto enviada con éxito a ${contact}`);
+                                        } else {
+                                            // Si falla la foto, enviar solo el texto
+                                            console.warn(`⚠️ No se pudo descargar la foto, enviando solo texto`);
+                                            await sock.sendMessage(contact, { text: menuResponse.mensaje });
+                                        }
+                                    } catch (photoError) {
+                                        console.error(`❌ Error al enviar foto: ${photoError.message}`);
+                                        // Si falla la foto, enviar solo el texto
+                                        await sock.sendMessage(contact, { text: menuResponse.mensaje });
+                                    }
+                                } else {
+                                    // No hay foto, enviar solo el mensaje
+                                    await sock.sendMessage(contact, { text: menuResponse.mensaje });
+                                }
+                            } else {
+                                // Respuesta simple (string)
+                                await sock.sendMessage(contact, { text: menuResponse });
+                            }
+                            
                             await sock.readMessages([msg.key]); // Marcar como leído después de responder
-                            console.log(`🤖 Respuesta de IA enviada a ${contact}`);
+                            console.log(`🤖 Respuesta de menú enviada a ${contact}`);
                         }
-                    } catch (aiError) {
-                        console.error('⚠️  Error en sistema de IA:', aiError.message);
-                        // Opcional: enviar mensaje de error al usuario
-                        // await sock.sendMessage(contact, { 
-                        //     text: 'Lo siento, estoy teniendo problemas técnicos. Intenta más tarde.' 
-                        // });
+                    } catch (menuError) {
+                        console.error('⚠️  Error en sistema de menús:', menuError.message);
+                        console.error('Stack trace:', menuError.stack);
                     }
                 }
             }
