@@ -113,7 +113,7 @@ async function buscarPorCedula(cedula) {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': authorization
+                'Authorization': `Bearer ${authorization}` 
             }
         });
 
