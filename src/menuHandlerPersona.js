@@ -136,6 +136,53 @@ async function buscarPorCedula(cedula) {
     }
 }
 
+// Función para verificar identificaciones en lote
+async function verificarLote(identificaciones) {
+    try {
+        const baseUrl = process.env.URL_VERIFICAR_LOTE || '';
+        const authorization = process.env.AUTHORIZATION_VERIFICAR_LOTE || '';
+        
+        if (!baseUrl) {
+            console.warn('⚠️ URL_VERIFICAR_LOTE no está configurada');
+            return { success: false, error: 'URL no configurada' };
+        }
+        
+        const payload = {
+            identificaciones: identificaciones
+        };
+        
+        // console.log(`🔍 Verificando lote en ${baseUrl}`);
+        // console.log(`📦 Payload:`, JSON.stringify(payload));
+        // console.log(`🔑 Authorization presente: ${authorization ? 'Sí (longitud: ' + authorization.length + ')' : 'No'}`);
+        
+        const response = await fetch(baseUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authorization}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        console.log(`📡 Status de respuesta: ${response.status} ${response.statusText}`);
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`❌ Error HTTP: ${response.status} ${response.statusText}`);
+            console.error(`📄 Respuesta del servidor: ${errorText.substring(0, 500)}`);
+            return { success: false, error: `Error HTTP: ${response.status}` };
+        }
+
+        const data = await response.json();
+        console.log('✅ Respuesta API Verificar Lote:', JSON.stringify(data).substring(0, 200));
+        
+        return { success: true, data: data };
+    } catch (error) {
+        console.error('❌ Error al verificar lote:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 // Función para buscar por nombre en API Nombres
 async function buscarPorNombre(nombre) {
     try {
@@ -167,6 +214,32 @@ async function buscarPorNombre(nombre) {
 
         const data = await response.json();
         console.log('✅ Respuesta API Nombres:', JSON.stringify(data).substring(0, 200));
+        
+        // Extraer identificaciones para verificar en lote
+        let identificaciones = [];
+        if (data.existe === 'si' && Array.isArray(data.data)) {
+            identificaciones = data.data
+                .map(persona => persona.identificacion || persona.cedula)
+                .filter(id => id); // Filtrar valores nulos/undefined
+        } else if (Array.isArray(data)) {
+            identificaciones = data
+                .map(persona => persona.identificacion || persona.cedula)
+                .filter(id => id);
+        }
+        
+        // Si hay identificaciones, verificar en lote
+        if (identificaciones.length > 0) {
+            console.log(`🔍 Verificando ${identificaciones.length} identificaciones en lote...`);
+            const verificacionResult = await verificarLote(identificaciones);
+            
+            if (verificacionResult.success) {
+                console.log('✅ Verificación en lote completada');
+                // Aquí puedes agregar la información de verificación a los datos si lo necesitas
+                // data.verificacion = verificacionResult.data;
+            } else {
+                console.warn('⚠️ Error en verificación en lote:', verificacionResult.error);
+            }
+        }
         
         return { success: true, data: data };
     } catch (error) {
