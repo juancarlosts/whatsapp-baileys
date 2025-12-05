@@ -4,6 +4,8 @@ version: '3.8'
 services:
   whatsapp-api:
     build: .
+    env_file:
+      - .env
     ports:
       - "3080:8080" # puerto HTTP externo: 3080 , interno: 8080
     volumes:
@@ -21,4 +23,6 @@ services:
       - URL_NOMBRES=${URL_NOMBRES}
       - URL_VERIFICAR_LOTE=${URL_VERIFICAR_LOTE}
       - AUTHORIZATION_VERIFICAR_LOTE=${AUTHORIZATION_VERIFICAR_LOTE}
+      - URL_API_N8N=${URL_API_N8N}
+      - AUTHORIZATION_N8N=${AUTHORIZATION_N8N}
     restart: unless-stopped

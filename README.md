@@ -14,7 +14,9 @@ Una API REST sencilla para enviar y recibir mensajes de WhatsApp usando **[Baile
 - ✅ Sistema de gestión de mensajes (leídos/no leídos)
 - ✅ Responder a mensajes específicos
 - ✅ **Sistema de respuestas automáticas con IA (SGIA)** 🤖✨
-- ✅ Integración con API Dify para chatbot inteligente
+- ✅ **Sistema de búsqueda de personas** (Cédula, Nombres, Placas) 🔍
+- ✅ Integración con API N8N para consultas de datos
+- ✅ Envío automático de fotos en resultados de búsqueda
 - ✅ Soporte para múltiples tipos de mensajes (texto, imagen, video, audio, documentos, ubicaciones, contactos, stickers, etc.)
 - ✅ API REST para integrar con otros servicios
 - ✅ Persistencia de sesión entre reinicios del contenedor
@@ -194,46 +196,78 @@ Cierra la sesión actual y genera un nuevo QR para reconexión.
 
 ---
 
-## 🎯 Sistema de Menús Interactivos
+## 🎯 Sistema de Búsqueda de Personas (API N8N)
 
-La API incluye un sistema de menús automático para interacción con usuarios. Ver documentación completa en [MENUS.md](MENUS.md).
+Sistema unificado para búsquedas de cédulas, nombres y placas vehiculares mediante API N8N.
 
-### Iniciar menú manualmente
+### 🔍 Tipos de búsqueda disponibles
 
-```http
-POST /menu/start
+El bot responde automáticamente cuando el usuario escribe "menu":
+
+```
+1️⃣ Buscar por Nombre
+2️⃣ Buscar por Cédula  
+3️⃣ Buscar por Placa
+0️⃣ Salir
 ```
 
-**Cuerpo (JSON):**
+### ⚙️ Configuración requerida
+
+Agrega estas variables en tu archivo `.env`:
+
+```env
+# API N8N para búsqueda de personas
+URL_API_N8N=https://tu-servidor-n8n.com/webhook/persondata
+AUTHORIZATION_N8N=tu_token_de_autorizacion
+```
+
+Y en `docker-compose.yml`:
+
+```yaml
+environment:
+  - URL_API_N8N=${URL_API_N8N}
+  - AUTHORIZATION_N8N=${AUTHORIZATION_N8N}
+```
+
+### 📡 Formato de la API
+
+La API debe responder a:
+
+```
+POST {URL_API_N8N}?type={tipo}&query={valor}
+Headers: persondata: {token}
+```
+
+**Parámetros:**
+- `type=cedula` - Búsqueda por cédula (ej: `query=0104967492`)
+- `type=nombres` - Búsqueda por nombres (ej: `query=Juan Perez`)
+- `type=placa` - Búsqueda por placa (ej: `query=ABB3175`)
+
+**Respuesta esperada:**
+
 ```json
 {
-  "to": "593995707647",
-  "menuId": "MAIN"
+  "data": "👤 Nombre: JUAN PEREZ\n📋 Cédula: 0104967492\n..."
 }
 ```
 
-### Listar menús disponibles
+o
 
-```http
-GET /menu/list
+```json
+{
+  "mensaje": "👤 Nombre: JUAN PEREZ\n📋 Cédula: 0104967492\n..."
+}
 ```
 
-### Ver estado del menú de un usuario
+### 📸 Soporte de fotos
 
-```http
-GET /menu/status/593995707647
+Si la respuesta incluye una URL de foto en el formato:
+
+```
+🖼️ Foto: https://ejemplo.com/foto.jpg
 ```
 
-### Limpiar estado del menú
-
-```http
-DELETE /menu/clear/593995707647
-```
-
-**Uso automático:**
-- Usuario escribe "Hola" → Menú de bienvenida
-- Usuario escribe "Menú" → Menú principal
-- Usuario en menú activo → Procesa opciones (1, 2, 3, etc.)
+El bot enviará automáticamente la imagen junto con los datos (sin mostrar la URL en el mensaje).
 
 ---
 
@@ -365,14 +399,16 @@ curl -X POST http://localhost:3080/logout \
 Crea un archivo `.env` en la raíz del proyecto:
 
 ```env
+# Seguridad
 LOGOUT_SECRET=tu_secreto_super_seguro_aqui
-```
 
-O modifica el `docker-compose.yml` directamente:
+# SGIA - Sistema de IA (opcional)
+SGIA_SECRET=tu_token_dify
+URL_API_DIFY=https://dify.ejemplo.com/v1
 
-```yaml
-environment:
-  - LOGOUT_SECRET=tu_secreto_super_seguro_aqui
+# API N8N - Sistema de búsqueda de personas
+URL_API_N8N=https://n8n.ejemplo.com/webhook/persondata
+AUTHORIZATION_N8N=tu_token_n8n
 ```
 
 ### Puertos

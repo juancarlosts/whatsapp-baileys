@@ -16,15 +16,44 @@ const STATES = {
     MENU_PRINCIPAL: 'MENU_PRINCIPAL',
     ESPERANDO_NOMBRE: 'ESPERANDO_NOMBRE',
     ESPERANDO_CEDULA: 'ESPERANDO_CEDULA',
+    ESPERANDO_PLACA: 'ESPERANDO_PLACA',
     MOSTRANDO_RESULTADOS: 'MOSTRANDO_RESULTADOS'
 };
+
+// Array de títulos aleatorios para el menú
+const titulosMenu = [
+    '👤 *Búsqueda de Personas*',
+    '🔎 *Consulta de Datos Personales*',
+    '👥 *Consulta de Ciudadanos*',
+    '👤 *Información del Ciudadano*',
+    '🧾 *Verificación de Identidad*',
+    '📋 *Revisión de Datos Registrales*',
+    '🕵️‍♂️ *Localizador de Personas*',
+    '📘 *Consulta de Información Civil*',
+    '📇 *Consulta del Registro de Personas*',
+    '💼 *Información Identificativa*',
+    '🗂️ *Datos del Ciudadano*',
+    '🧍‍♂️ *Información Personal Encontrada*',
+    '📁 *Detalles del Registro Ciudadano*',
+    '🔍 *Identificación y Verificación*',
+    '🧭 *Localización de Datos Personales*',
+    '🪪 *Consulta del Documento de Identidad*',
+    '👫 *Información de Personas Registradas*',
+    '📑 *Verificación de Datos Civiles*',
+    '🗃️ *Consulta del Archivo Ciudadano*'
+];
+
+// Función para obtener un título aleatorio
+function getTituloAleatorio() {
+    return titulosMenu[Math.floor(Math.random() * titulosMenu.length)];
+}
 
 // Definición de menús
 const MENUS = {
     PRINCIPAL: {
         id: 'PRINCIPAL',
-        title: '🔍 *Búsqueda de Personas*',
-        message: 'Bienvenido al sistema de búsqueda.\n\n¿Cómo deseas buscar?\n\n1️⃣ Buscar por Nombre\n2️⃣ Buscar por Cédula\n0️⃣ Salir\n\n_Escribe el número de tu opción_',
+        title: getTituloAleatorio(),
+        message: 'Bienvenido al sistema de búsqueda.\n\n¿Cómo deseas buscar?\n\n1️⃣ Buscar por Nombre\n2️⃣ Buscar por Cédula\n3️⃣ Buscar por Placa\n0️⃣ Salir\n\n_Escribe el número de tu opción_',
         state: STATES.MENU_PRINCIPAL
     }
 };
@@ -55,6 +84,9 @@ function startMenu(userId, menuId = 'PRINCIPAL') {
     
     const menu = MENUS[menuId];
     if (!menu) return null;
+    
+    // Asignar un título aleatorio cada vez que se inicia el menú
+    menu.title = getTituloAleatorio();
     
     // Configurar timeout
     setTimeout(() => {
@@ -97,155 +129,64 @@ function formatMenuMessage(menu, userId = null) {
     return mensaje;
 }
 
-// Función para buscar por cédula en API Colmena
-async function buscarPorCedula(cedula) {
+// Función unificada para realizar búsquedas en API N8N
+async function buscarEnAPI(type, query) {
     try {
-        const baseUrl = process.env.URL_CEDULA || 'https://datos.los4rios.com/api_abeja/';
-        const authorization = process.env.AUTHORIZATION || '';
-        
-        // Construir URL con query parameters
-        const url = `${baseUrl}${encodeURIComponent(cedula)}`;
-        
-        console.log(`🔍 Buscando cédula: ${cedula} en ${url}`);
-        console.log(`🔑 Authorization presente: ${authorization ? 'Sí (longitud: ' + authorization.length + ')' : 'No'}`);
-        
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${authorization}` 
-            }
-        });
-
-        console.log(`📡 Status de respuesta: ${response.status} ${response.statusText}`);
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`❌ Error HTTP: ${response.status} ${response.statusText}`);
-            console.error(`📄 Respuesta del servidor: ${errorText.substring(0, 500)}`);
-            return { success: false, error: `Error HTTP: ${response.status}` };
-        }
-
-        const data = await response.json();
-        console.log('✅ Respuesta API Colmena:', JSON.stringify(data).substring(0, 200));
-        
-        return { success: true, data: data };
-    } catch (error) {
-        console.error('❌ Error al buscar por cédula:', error);
-        return { success: false, error: error.message };
-    }
-}
-
-// Función para verificar identificaciones en lote
-async function verificarLote(identificaciones) {
-    try {
-        const baseUrl = process.env.URL_VERIFICAR_LOTE || '';
-        const authorization = process.env.AUTHORIZATION_VERIFICAR_LOTE || '';
+        const baseUrl = process.env.URL_API_N8N;
+        const token = process.env.AUTHORIZATION_N8N || '';
         
         if (!baseUrl) {
-            console.warn('⚠️ URL_VERIFICAR_LOTE no está configurada');
-            return { success: false, error: 'URL no configurada' };
+            console.error('❌ URL_API_N8N no está configurada en el archivo .env');
+            return { success: false, error: 'URL_API_N8N no configurada' };
         }
         
-        const payload = {
-            identificaciones: identificaciones
-        };
+        // Construir URL con parámetros
+        const url = `${baseUrl}?type=${encodeURIComponent(type)}&query=${encodeURIComponent(query)}`;
         
-        // console.log(`🔍 Verificando lote en ${baseUrl}`);
-        // console.log(`📦 Payload:`, JSON.stringify(payload));
-        // console.log(`🔑 Authorization presente: ${authorization ? 'Sí (longitud: ' + authorization.length + ')' : 'No'}`);
+        console.log(`🔍 Búsqueda [${type}]: ${query}`);
+        console.log(`📡 URL: ${url}`);
+        console.log(`🔑 Token presente: ${token ? 'Sí' : 'No'}`);
         
-        const response = await fetch(baseUrl, {
+        const response = await fetch(url, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${authorization}`
-            },
-            body: JSON.stringify(payload)
+                'persondata': token
+            }
         });
 
-        console.log(`📡 Status de respuesta: ${response.status} ${response.statusText}`);
+        console.log(`📡 Status: ${response.status} ${response.statusText}`);
 
         if (!response.ok) {
             const errorText = await response.text();
             console.error(`❌ Error HTTP: ${response.status} ${response.statusText}`);
-            console.error(`📄 Respuesta del servidor: ${errorText.substring(0, 500)}`);
+            console.error(`📄 Respuesta: ${errorText.substring(0, 500)}`);
             return { success: false, error: `Error HTTP: ${response.status}` };
         }
 
         const data = await response.json();
-        console.log('✅ Respuesta API Verificar Lote:', JSON.stringify(data).substring(0, 200));
+        console.log('✅ Respuesta API:', JSON.stringify(data).substring(0, 200));
         
-        return { success: true, data: data };
+        return { success: true, data };
     } catch (error) {
-        console.error('❌ Error al verificar lote:', error);
+        console.error(`❌ Error en búsqueda [${type}]:`, error);
         return { success: false, error: error.message };
     }
 }
 
-// Función para buscar por nombre en API Nombres
+// Función para buscar por cédula
+async function buscarPorCedula(cedula) {
+    return await buscarEnAPI('cedula', cedula);
+}
+
+// Función para buscar por nombre
 async function buscarPorNombre(nombre) {
-    try {
-        const baseUrl = process.env.URL_NOMBRES || 'https://datos.los4rios.com/api_busca_nombres/';
-        const authorization = process.env.AUTHORIZATION_NOMBRES || '';
-        
-        // Construir URL con query parameters
-        const url = `${baseUrl}${encodeURIComponent(nombre)}`;
-        
-        console.log(`🔍 Buscando nombre: ${nombre} en ${url}`);
-        console.log(`🔑 Authorization presente: ${authorization ? 'Sí (longitud: ' + authorization.length + ')' : 'No'}`);
-        
-        const response = await fetch(url, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': authorization
-            }
-        });
+    return await buscarEnAPI('nombres', nombre);
+}
 
-        console.log(`📡 Status de respuesta: ${response.status} ${response.statusText}`);
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error(`❌ Error HTTP: ${response.status} ${response.statusText}`);
-            console.error(`📄 Respuesta del servidor: ${errorText.substring(0, 500)}`);
-            return { success: false, error: `Error HTTP: ${response.status}` };
-        }
-
-        const data = await response.json();
-        console.log('✅ Respuesta API Nombres:', JSON.stringify(data).substring(0, 200));
-        
-        // Extraer identificaciones para verificar en lote
-        let identificaciones = [];
-        if (data.existe === 'si' && Array.isArray(data.data)) {
-            identificaciones = data.data
-                .map(persona => persona.identificacion || persona.cedula)
-                .filter(id => id); // Filtrar valores nulos/undefined
-        } else if (Array.isArray(data)) {
-            identificaciones = data
-                .map(persona => persona.identificacion || persona.cedula)
-                .filter(id => id);
-        }
-        
-        // Si hay identificaciones, verificar en lote
-        if (identificaciones.length > 0) {
-            console.log(`🔍 Verificando ${identificaciones.length} identificaciones en lote...`);
-            const verificacionResult = await verificarLote(identificaciones);
-            
-            if (verificacionResult.success) {
-                console.log('✅ Verificación en lote completada');
-                // Aquí puedes agregar la información de verificación a los datos si lo necesitas
-                // data.verificacion = verificacionResult.data;
-            } else {
-                console.warn('⚠️ Error en verificación en lote:', verificacionResult.error);
-            }
-        }
-        
-        return { success: true, data: data };
-    } catch (error) {
-        console.error('❌ Error al buscar por nombre:', error);
-        return { success: false, error: error.message };
-    }
+// Función para buscar por placa
+async function buscarPorPlaca(placa) {
+    return await buscarEnAPI('placa', placa);
 }
 
 // Formatear resultados de búsqueda por cédula
@@ -254,201 +195,28 @@ function formatResultadoCedula(data) {
         return { mensaje: '❌ No se encontraron resultados para esta cédula.', photo: null };
     }
 
-    let mensaje = '✅ *Resultado de la búsqueda*\n\n';
-    let photoUrl = null;
-    
-    // Verificar si existe el campo "existe"
-    if (data.existe === 'no') {
-        return { mensaje: '❌ No se encontró información para esta cédula.', photo: null };
+    // Si la API devuelve los datos ya formateados en data.data o data.mensaje
+    const textoRespuesta = data.data || data.mensaje;
+    if (textoRespuesta && typeof textoRespuesta === 'string') {
+        // Extraer URL de foto si existe en el texto
+        let photoUrl = null;
+        const photoMatch = textoRespuesta.match(/(?:🖼️\s*Foto:|Foto:)\s*(https?:\/\/[^\s\n]+)/i);
+        if (photoMatch) {
+            photoUrl = photoMatch[1];
+            console.log(`📸 URL de foto extraída: ${photoUrl}`);
+        }
+        
+        // Eliminar la línea de la foto del mensaje
+        let mensajeLimpio = textoRespuesta.replace(/(?:🖼️\s*Foto:|Foto:)\s*https?:\/\/[^\s\n]+\s*/gi, '');
+        
+        return { 
+            mensaje: '✅ *Resultado de la búsqueda*\n\n' + mensajeLimpio + '\n\n_Escribe "menu" para volver al menú principal_', 
+            photo: photoUrl 
+        };
     }
-    
-    // Si viene con estructura {existe: "si", data: {...}}
-    if (data.existe === 'si' && data.data) {
-        const persona = Array.isArray(data.data) ? data.data[0] : data.data;
-        
-        if (!persona) {
-            return { mensaje: '❌ No se encontró información para esta cédula.', photo: null };
-        }
-        
-        // Capturar la URL de la foto si existe y construir la URL completa
-        if (persona.photo || persona.foto || persona.imagen) {
-            const photoPath = persona.photo || persona.foto || persona.imagen;
-            const baseUrl = process.env.URL || 'https://datos.los4rios.com';
-            
-            // Si la ruta de la foto comienza con /, construir URL completa
-            if (photoPath.startsWith('/')) {
-                photoUrl = `${baseUrl}${photoPath}`;
-            } else {
-                photoUrl = `${baseUrl}/${photoPath}`;
-            }
-            
-            console.log(`📸 URL de foto construida: ${photoUrl}`);
-        }
-        
-        mensaje += `👤 *Nombre:* ${persona.nombrescompletos || persona.nombres || persona.nombre || 'N/A'}\n`;
-        mensaje += `📋 *Cédula:* ${persona.identificacion || persona.cedula || 'N/A'}\n`;
-        
-        if (persona.nacimiento || persona.fecha_nacimiento || persona.fechaNacimiento) {
-            const fechaNac = persona.nacimiento || persona.fecha_nacimiento || persona.fechaNacimiento;
-            mensaje += `🎂 *Fecha Nacimiento:* ${fechaNac}`;
-            
-            // Calcular edad
-            const edad = calcularEdad(fechaNac);
-            if (edad !== null) {
-                mensaje += ` *(${edad} años)*`;
-            }
-            mensaje += '\n';
-        }
-        
-        if (persona.estado_civil || persona.estadoCivil) {
-            mensaje += `💑 *Estado Civil:* ${persona.estado_civil || persona.estadoCivil}\n`;
-        }
-        
-        if (persona.direccion) {
-            mensaje += `🏠 *Dirección:* ${persona.direccion}\n`;
-        }
-        
-        if (persona.telefono) {
-            mensaje += `📞 *Teléfono:* ${persona.telefono}\n`;
-        }
 
-        if (persona.celular) {
-            mensaje += `📱 *Celular:* ${persona.celular}\n`;
-        }
-        
-        if (persona.correo) {
-            mensaje += `📧 *Email:* ${persona.correo}\n`;
-        }
-        
-        // ===== ESTUDIOS BÁSICOS =====
-        if (persona.basicos && Array.isArray(persona.basicos) && persona.basicos.length > 0) {
-            mensaje += `\n📚 *Estudios Básicos:*\n`;
-            persona.basicos.forEach((estudio, index) => {
-                mensaje += `   ${index + 1}. ${estudio.titulo || 'N/A'}\n`;
-                if (estudio.institucion) {
-                    mensaje += `      🏫 ${estudio.institucion}\n`;
-                }
-                if (estudio.especialidad) {
-                    mensaje += `      📖 Especialidad: ${estudio.especialidad}\n`;
-                }
-            });
-        }
-        
-        // ===== ESTUDIOS SUPERIORES =====
-        if (persona.superiores && Array.isArray(persona.superiores) && persona.superiores.length > 0) {
-            mensaje += `\n🎓 *Estudios Superiores:*\n`;
-            persona.superiores.forEach((estudio, index) => {
-                mensaje += `   ➤ `;
-                if (estudio.nivel) {
-                    mensaje += `*${estudio.nivel}* - `;
-                }
-                mensaje += `${estudio.titulo || 'N/A'}\n`;
-                if (estudio.institucion) {
-                    mensaje += `      🏫 ${estudio.institucion}\n`;
-                }
-                if (estudio.fechagraduacion) {
-                    mensaje += `      📅 Graduación: ${estudio.fechagraduacion}\n`;
-                }
-            });
-        }
-    }
-    // Intentar otras estructuras de respuesta
-    else if (data.persona || data.data || data.resultado) {
-        const persona = data.persona || data.data || data.resultado;
-        
-        // Capturar la URL de la foto si existe y construir la URL completa
-        if (persona.photo || persona.foto || persona.imagen) {
-            const photoPath = persona.photo || persona.foto || persona.imagen;
-            const baseUrl = process.env.URL || 'https://datos.los4rios.com';
-            
-            // Si la ruta de la foto comienza con /, construir URL completa
-            if (photoPath.startsWith('/')) {
-                photoUrl = `${baseUrl}${photoPath}`;
-            } else {
-                photoUrl = `${baseUrl}/${photoPath}`;
-            }
-            
-            console.log(`📸 URL de foto construida: ${photoUrl}`);
-        }
-        
-        mensaje += `👤 *Nombre:* ${persona.nombrescompletos || persona.nombres || persona.nombre || 'N/A'}\n`;
-        mensaje += `📋 *Cédula:* ${persona.identificacion || persona.cedula || 'N/A'}\n`;
-        
-        if (persona.nacimiento || persona.fecha_nacimiento || persona.fechaNacimiento) {
-            const fechaNac = persona.nacimiento || persona.fecha_nacimiento || persona.fechaNacimiento;
-            mensaje += `🎂 *Fecha Nacimiento:* ${fechaNac}`;
-            
-            // Calcular edad
-            const edad = calcularEdad(fechaNac);
-            if (edad !== null) {
-                mensaje += ` (${edad} años)`;
-            }
-            mensaje += '\n';
-        }
-        
-        if (persona.estado_civil || persona.estadoCivil) {
-            mensaje += `💑 *Estado Civil:* ${persona.estado_civil || persona.estadoCivil}\n`;
-        }
-        
-        if (persona.direccion) {
-            mensaje += `🏠 *Dirección:* ${persona.direccion}\n`;
-        }
-        
-        if (persona.telefono) {
-            mensaje += `📞 *Teléfono:* ${persona.telefono}\n`;
-        }
-
-        if (persona.celular) {
-            mensaje += `📱 *Celular:* ${persona.celular}\n`;
-        }
-        
-        if (persona.correo) {
-            mensaje += `📧 *Email:* ${persona.correo}\n`;
-        }
-        
-        // ===== ESTUDIOS BÁSICOS =====
-        if (persona.basicos && Array.isArray(persona.basicos) && persona.basicos.length > 0) {
-            mensaje += `\n📚 *Estudios Básicos:*\n`;
-            persona.basicos.forEach((estudio, index) => {
-                mensaje += `   ${index + 1}. ${estudio.titulo || 'N/A'}\n`;
-                if (estudio.institucion) {
-                    mensaje += `      🏫 ${estudio.institucion}\n`;
-                }
-                if (estudio.especialidad) {
-                    mensaje += `      📖 Especialidad: ${estudio.especialidad}\n`;
-                }
-            });
-        }
-        
-        // ===== ESTUDIOS SUPERIORES =====
-        if (persona.superiores && Array.isArray(persona.superiores) && persona.superiores.length > 0) {
-            mensaje += `\n🎓 *Estudios Superiores:*\n`;
-            persona.superiores.forEach((estudio, index) => {
-                mensaje += `  ➡️ ${index + 1}. `;
-                if (estudio.nivel) {
-                    mensaje += `*${estudio.nivel}* - `;
-                }
-                mensaje += `${estudio.titulo || 'N/A'}\n`;
-                if (estudio.institucion) {
-                    mensaje += `      🏫 ${estudio.institucion}\n`;
-                }
-                if (estudio.fechagraduacion) {
-                    mensaje += `      📅 Graduación: ${estudio.fechagraduacion}\n`;
-                }
-            });
-        }
-    } else {
-        // Si la estructura es diferente, mostrar datos disponibles
-        mensaje += '📋 *Información disponible:*\n\n';
-        for (const [key, value] of Object.entries(data)) {
-            if (typeof value !== 'object') {
-                mensaje += `*${key}:* ${value}\n`;
-            }
-        }
-    }
-    
-    mensaje += '\n_Escribe "menu" para volver al menú principal_';
-    return { mensaje, photo: photoUrl };
+    // Si no hay datos pre-formateados, retornar error
+    return { mensaje: '❌ No se encontró información para esta cédula.', photo: null };
 }
 
 // Formatear resultados de búsqueda por nombre
@@ -457,122 +225,30 @@ function formatResultadoNombre(data) {
         return '❌ No se encontraron resultados para este nombre.';
     }
 
-    let mensaje = '✅ *Resultados de la búsqueda*\n\n';
-    
-    // Verificar si existe el campo "existe"
-    if (data.existe === 'no' || (data.existe === 'si' && (!data.data || data.data.length === 0))) {
-        return '❌ No se encontraron personas con ese nombre.';
+    // Si la API devuelve los datos ya formateados en data.data o data.mensaje
+    const mensaje = data.data || data.mensaje;
+    if (mensaje && typeof mensaje === 'string') {
+        return '✅ *Resultados de la búsqueda*\n\n' + mensaje + '\n\n_Escribe "menu" para volver al menú principal_';
     }
-    
-    // Si viene con estructura {existe: "si", data: [...]}
-    if (data.existe === 'si' && Array.isArray(data.data)) {
-        const resultados = data.data;
-        
-        mensaje += `_Se encontraron ${resultados.length} resultado(s):_\n\n`;
-        
-        // Limitar a los primeros 5 resultados
-        const resultadosLimitados = resultados.slice(0, 10);
-        resultadosLimitados.forEach((persona, index) => {
-            mensaje += `*${index + 1}.* `;
-            mensaje += `${persona.nombrescompletos || persona.nombres || 'N/A'}\n`;
-            mensaje += `   📋 Cédula: ${persona.identificacion || persona.cedula || 'N/A'}\n`;
-            
-            if (persona.nacimiento || persona.fecha_nacimiento) {
-                mensaje += `   🎂 Nacimiento: ${persona.nacimiento || persona.fecha_nacimiento}\n`;
-            }
-            
-            mensaje += '\n';
-        });
-        
-        if (resultados.length > 5) {
-            mensaje += `_...y ${resultados.length - 5} resultado(s) más_\n\n`;
-        }
-    }
-    // Si es un array de resultados directo
-    else if (Array.isArray(data)) {
-        if (data.length === 0) {
-            return '❌ No se encontraron personas con ese nombre.';
-        }
-        
-        mensaje += `_Se encontraron ${data.length} resultado(s):_\n\n`;
-        
-        // Limitar a los primeros 5 resultados
-        const resultados = data.slice(0, 5);
-        resultados.forEach((persona, index) => {
-            mensaje += `*${index + 1}.* `;
-            mensaje += `${persona.nombrescompletos || persona.nombres || persona.nombre || 'N/A'}\n`;
-            mensaje += `   📋 Cédula: ${persona.identificacion || persona.cedula || 'N/A'}\n`;
-            
-            if (persona.nacimiento || persona.fecha_nacimiento || persona.fechaNacimiento) {
-                mensaje += `   🎂 Nacimiento: ${persona.nacimiento || persona.fecha_nacimiento || persona.fechaNacimiento}\n`;
-            }
-            
-            mensaje += '\n';
-        });
-        
-        if (data.length > 5) {
-            mensaje += `_...y ${data.length - 5} resultado(s) más_\n\n`;
-        }
-    } 
-    // Si es un objeto con resultados
-    else if (data.resultados && Array.isArray(data.resultados)) {
-        return formatResultadoNombre(data.resultados);
-    }
-    // Si es un solo resultado
-    else if (typeof data === 'object') {
-        mensaje += `👤 *Nombre:* ${data.nombrescompletos || data.nombres || data.nombre || 'N/A'}\n`;
-        mensaje += `📋 *Cédula:* ${data.identificacion || data.cedula || 'N/A'}\n`;
-        
-        if (data.nacimiento || data.fecha_nacimiento || data.fechaNacimiento) {
-            mensaje += `🎂 *Fecha Nacimiento:* ${data.nacimiento || data.fecha_nacimiento || data.fechaNacimiento}\n`;
-        }
-    }
-    
-    mensaje += '\n_Escribe "menu" para volver al menú principal_';
-    return mensaje;
+
+    // Si no hay datos pre-formateados, retornar error
+    return '❌ No se encontraron personas con ese nombre.';
 }
 
-// Calcular edad a partir de fecha de nacimiento
-function calcularEdad(fechaNacimiento) {
-    if (!fechaNacimiento) return null;
-    
-    try {
-        // Intentar parsear diferentes formatos de fecha
-        let fecha;
-        
-        // Formato: YYYY-MM-DD o YYYY/MM/DD
-        if (/^\d{4}[-/]\d{2}[-/]\d{2}/.test(fechaNacimiento)) {
-            fecha = new Date(fechaNacimiento);
-        }
-        // Formato: DD-MM-YYYY o DD/MM/YYYY
-        else if (/^\d{2}[-/]\d{2}[-/]\d{4}/.test(fechaNacimiento)) {
-            const partes = fechaNacimiento.split(/[-/]/);
-            fecha = new Date(partes[2], partes[1] - 1, partes[0]);
-        }
-        else {
-            // Intentar parsear directamente
-            fecha = new Date(fechaNacimiento);
-        }
-        
-        // Verificar si la fecha es válida
-        if (isNaN(fecha.getTime())) {
-            return null;
-        }
-        
-        const hoy = new Date();
-        let edad = hoy.getFullYear() - fecha.getFullYear();
-        const mes = hoy.getMonth() - fecha.getMonth();
-        
-        // Ajustar si aún no ha cumplido años este año
-        if (mes < 0 || (mes === 0 && hoy.getDate() < fecha.getDate())) {
-            edad--;
-        }
-        
-        return edad >= 0 ? edad : null;
-    } catch (error) {
-        console.error('Error al calcular edad:', error);
-        return null;
+// Formatear resultados de búsqueda por placa
+function formatResultadoPlaca(data) {
+    if (!data || typeof data !== 'object') {
+        return '❌ No se encontraron resultados para esta placa.';
     }
+
+    // Si la API devuelve los datos ya formateados en data.data o data.mensaje
+    const mensaje = data.data || data.mensaje;
+    if (mensaje && typeof mensaje === 'string') {
+        return '✅ *Resultado de la búsqueda de placa*\n\n' + mensaje + '\n\n_Escribe "menu" para volver al menú principal_';
+    }
+
+    // Si no hay datos pre-formateados, retornar error
+    return '❌ No se encontró información para esta placa.';
 }
 
 // Validar formato de cédula ecuatoriana
@@ -586,6 +262,21 @@ function validarCedula(cedula) {
     }
     
     return true;
+}
+
+// Validar formato de placa ecuatoriana
+function validarPlaca(placa) {
+    // Eliminar espacios y convertir a mayúsculas
+    placa = placa.replace(/\s/g, '').toUpperCase();
+    
+    // Formatos válidos en Ecuador:
+    // ABC-1234 (vehículos particulares)
+    // ABC-123 (motos)
+    // Permitir con o sin guión
+    const formatoParticular = /^[A-Z]{3}-?\d{4}$/;
+    const formatoMoto = /^[A-Z]{3}-?\d{3}$/;
+    
+    return formatoParticular.test(placa) || formatoMoto.test(placa);
 }
 
 // Procesar respuesta del usuario
@@ -628,6 +319,10 @@ async function processUserResponse(userId, message) {
                 // Búsqueda por cédula
                 state.state = STATES.ESPERANDO_CEDULA;
                 return '🆔 *Búsqueda por Cédula*\n\n📝 Por favor, escribe el número de cédula (10 dígitos):\n\n_Ejemplo: 1234567890_';
+            } else if (normalizedMessage === '3') {
+                // Búsqueda por placa
+                state.state = STATES.ESPERANDO_PLACA;
+                return '🚗 *Búsqueda por Placa*\n\n📝 Por favor, escribe el número de placa del vehículo:\n\n_Ejemplo: AAA3175';
             } else {
                 return '❌ Opción no válida.\n\n' + formatMenuMessage(MENUS.PRINCIPAL);
             }
@@ -666,6 +361,23 @@ async function processUserResponse(userId, message) {
                 return `❌ Error al realizar la búsqueda: ${resultadoCedula.error}\n\n_Escribe "menu" para intentar nuevamente._`;
             }
             
+        case STATES.ESPERANDO_PLACA:
+            if (!validarPlaca(normalizedMessage)) {
+                return '⚠️ Placa inválida. Formato esperado: ABC1234 o ABC-1234\n\n📝 Intenta nuevamente:';
+            }
+            
+            // Realizar búsqueda por placa
+            state.state = STATES.MOSTRANDO_RESULTADOS;
+            const resultadoPlaca = await buscarPorPlaca(normalizedMessage.toUpperCase());
+            
+            if (resultadoPlaca.success) {
+                clearConversationState(userId); // Limpiar después de mostrar resultado
+                return formatResultadoPlaca(resultadoPlaca.data);
+            } else {
+                clearConversationState(userId);
+                return `❌ Error al realizar la búsqueda: ${resultadoPlaca.error}\n\n_Escribe "menu" para intentar nuevamente._`;
+            }
+            
         default:
             // Estado desconocido, reiniciar
             return startMenu(userId);
@@ -699,9 +411,35 @@ function getCurrentMenu(userId) {
     const state = conversationStates.get(userId);
     if (!state) return null;
     
+    // Array de títulos aleatorios
+    const titulos = [
+        '👤 Búsqueda de Personas',
+        '🔎 Consulta de Datos Personales',
+        '👥 Consulta de Ciudadanos',
+        '👤 Información del Ciudadano',
+        '🧾 Verificación de Identidad',
+        '📋 Revisión de Datos Registrales',
+        '🕵️‍♂️ Localizador de Personas',
+        '📘 Consulta de Información Civil',
+        '📇 Consulta del Registro de Personas',
+        '💼 Información Identificativa',
+        '🗂️ Datos del Ciudadano',
+        '🧍‍♂️ Información Personal Encontrada',
+        '📁 Detalles del Registro Ciudadano',
+        '🔍 Identificación y Verificación',
+        '🧭 Localización de Datos Personales',
+        '🪪 Consulta del Documento de Identidad',
+        '👫 Información de Personas Registradas',
+        '📑 Verificación de Datos Civiles',
+        '🗃️ Consulta del Archivo Ciudadano'
+    ];
+    
+    // Seleccionar un título aleatorio
+    const tituloAleatorio = titulos[Math.floor(Math.random() * titulos.length)];
+    
     return {
         id: state.state,
-        title: 'Búsqueda de Personas',
+        title: tituloAleatorio,
         state: state.state
     };
 }
