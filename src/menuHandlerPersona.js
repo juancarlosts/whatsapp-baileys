@@ -195,8 +195,8 @@ function formatResultadoCedula(data) {
         return { mensaje: '❌ No se encontraron resultados para esta cédula.', photo: null };
     }
 
-    // Si la API devuelve los datos ya formateados en data.data o data.mensaje
-    const textoRespuesta = data.data || data.mensaje;
+    // Si la API devuelve los datos ya formateados en data.data, data.mensaje o data.formattedOutput
+    const textoRespuesta = data.data || data.mensaje || data.formattedOutput;
     if (textoRespuesta && typeof textoRespuesta === 'string') {
         // Extraer URL de foto si existe en el texto
         let photoUrl = null;
@@ -225,8 +225,8 @@ function formatResultadoNombre(data) {
         return '❌ No se encontraron resultados para este nombre.';
     }
 
-    // Si la API devuelve los datos ya formateados en data.data o data.mensaje
-    const mensaje = data.data || data.mensaje;
+    // Si la API devuelve los datos ya formateados en data.data, data.mensaje o data.formattedOutput
+    const mensaje = data.data || data.mensaje || data.formattedOutput;
     if (mensaje && typeof mensaje === 'string') {
         return '✅ *Resultados de la búsqueda*\n\n' + mensaje + '\n\n_Escribe "menu" para volver al menú principal_';
     }
@@ -241,8 +241,8 @@ function formatResultadoPlaca(data) {
         return '❌ No se encontraron resultados para esta placa.';
     }
 
-    // Si la API devuelve los datos ya formateados en data.data o data.mensaje
-    const mensaje = data.data || data.mensaje;
+    // Si la API devuelve los datos ya formateados en data.data, data.mensaje o data.formattedOutput
+    const mensaje = data.data || data.mensaje || data.formattedOutput;
     if (mensaje && typeof mensaje === 'string') {
         return '✅ *Resultado de la búsqueda de placa*\n\n' + mensaje + '\n\n_Escribe "menu" para volver al menú principal_';
     }
@@ -270,13 +270,14 @@ function validarPlaca(placa) {
     placa = placa.replace(/\s/g, '').toUpperCase();
     
     // Formatos válidos en Ecuador:
-    // ABC-1234 (vehículos particulares)
-    // ABC-123 (motos)
-    // Permitir con o sin guión
+    // ABC-1234 o ABC1234 (vehículos particulares)
+    // ABC-123 o ABC123 (motos formato nuevo)
+    // AB123C (motos formato antiguo: 2 letras + 3 números + 1 letra)
     const formatoParticular = /^[A-Z]{3}-?\d{4}$/;
-    const formatoMoto = /^[A-Z]{3}-?\d{3}$/;
+    const formatoMotoNuevo = /^[A-Z]{3}-?\d{3}$/;
+    const formatoMotoAntiguo = /^[A-Z]{2}\d{3}[A-Z]$/;
     
-    return formatoParticular.test(placa) || formatoMoto.test(placa);
+    return formatoParticular.test(placa) || formatoMotoNuevo.test(placa) || formatoMotoAntiguo.test(placa);
 }
 
 // Procesar respuesta del usuario
@@ -314,7 +315,7 @@ async function processUserResponse(userId, message) {
             if (normalizedMessage === '1') {
                 // Búsqueda por nombre
                 state.state = STATES.ESPERANDO_NOMBRE;
-                return '👤 *Búsqueda por Nombre*\n\n📝 Por favor, escribe el nombre completo o parcial de la persona que deseas buscar:\n\n_Ejemplo: Juan Pérez_';
+                return '👤 *Búsqueda por Nombre*\n\n📝 Por favor, escribe primero los APELLIDOS y luego los NOMBRES de la persona que deseas buscar (mínimo 2 palabras):\n\n_Ejemplo: Lopez Leon Pepito Andres o Pérez Juan_';
             } else if (normalizedMessage === '2') {
                 // Búsqueda por cédula
                 state.state = STATES.ESPERANDO_CEDULA;
@@ -322,7 +323,7 @@ async function processUserResponse(userId, message) {
             } else if (normalizedMessage === '3') {
                 // Búsqueda por placa
                 state.state = STATES.ESPERANDO_PLACA;
-                return '🚗 *Búsqueda por Placa*\n\n📝 Por favor, escribe el número de placa del vehículo:\n\n_Ejemplo: AAA3175';
+                return '🚗 *Búsqueda por Placa*\n\n📝 Por favor, escribe el número de placa del vehículo:\n\n_Ejemplo: AAA1234_';
             } else {
                 return '❌ Opción no válida.\n\n' + formatMenuMessage(MENUS.PRINCIPAL);
             }
@@ -330,6 +331,12 @@ async function processUserResponse(userId, message) {
         case STATES.ESPERANDO_NOMBRE:
             if (normalizedMessage.length < 3) {
                 return '⚠️ El nombre debe tener al menos 3 caracteres.\n\n📝 Intenta nuevamente:';
+            }
+            
+            // Validar que tenga al menos 2 palabras (apellido y nombre)
+            const palabras = normalizedMessage.trim().split(/\s+/);
+            if (palabras.length < 2) {
+                return '⚠️ Debes ingresar al menos 2 palabras (apellidos y nombres).\n\n_Ejemplo: Lopez Leon Pepito Andres o Pérez Juan_\n\n📝 Intenta nuevamente:';
             }
             
             // Realizar búsqueda por nombre
