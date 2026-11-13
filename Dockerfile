@@ -10,4 +10,4 @@ COPY --from=build /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
 EXPOSE 8080
-CMD ["node", "--max-old-space-size=96", "--max-semi-space-size=2", "src/index.js"]
+CMD ["node", "--max-old-space-size=192", "--max-semi-space-size=2", "src/index.js"]

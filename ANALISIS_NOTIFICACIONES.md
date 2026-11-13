@@ -1,5 +1,7 @@
 # Análisis: servicio de notificaciones WhatsApp con Baileys
 
+> **Nota:** este es el análisis inicial (un solo número). El servicio se implementó después con varias sesiones; la documentación vigente está en [README.md](README.md) y [docs/INTEGRACION.md](docs/INTEGRACION.md).
+
 Fecha: 2026-11-12
 Servidor: Oracle Cloud (Linux 6.17, 5.8 GB RAM, 4 GB swap)
 Proyecto: `/data/docker/whatsapp-baileys`

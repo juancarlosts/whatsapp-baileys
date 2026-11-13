@@ -1,201 +1,53 @@
-// Servicio de notificaciones por WhatsApp (solo envío).
+// Servicio de notificaciones por WhatsApp con varias sesiones (un número por sesión).
 import { createServer } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
-import { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } from 'baileys';
-import pino from 'pino';
 import qrcode from 'qrcode-terminal';
+import * as wa from './sessions.js';
 
-const env = process.env;
-const PORT = Number(env.PORT) || 8080;
-const SESSION_DIR = env.SESSION_DIR || './session';
-const SEND_INTERVAL_MS = Number(env.SEND_INTERVAL_MS) || 4000;
-const QUEUE_MAX = Number(env.QUEUE_MAX) || 200;
-const QUEUE_MAX_BYTES = (Number(env.QUEUE_MAX_MB) || 20) * 1024 * 1024;
-const PER_RECIPIENT_PER_MIN = Number(env.PER_RECIPIENT_PER_MIN) || 5;
-const ALERT_WEBHOOK_URL = env.ALERT_WEBHOOK_URL || '';
+const { HttpError, log } = wa;
+const PORT = Number(process.env.PORT) || 8080;
 const BODY_LIMIT = 5 * 1024 * 1024;
-const MAX_RETRIES = 2;
-
 const sha256 = (s) => createHash('sha256').update(s).digest();
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-// API_KEYS="sistema:clave,otro:clave"
-const API_KEYS = (env.API_KEYS || '')
+// API_KEYS="nombre:clave:alcance,..."  alcance: "*" (administrador) o sesiones
+// separadas por "|", con "*" final como comodín: "sistema|cliente-*"
+const API_KEYS = (process.env.API_KEYS || '')
     .split(',')
-    .map((p) => p.trim().split(':'))
-    .filter(([name, key]) => name && key)
-    .map(([name, key]) => ({ name, hash: sha256(key) }));
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+        const [name, key, scope] = entry.split(':');
+        if (!name || !key || !scope) {
+            console.error(`API_KEYS: la entrada de "${name}" debe tener el formato nombre:clave:alcance`);
+            process.exit(1);
+        }
+        return { name, hash: sha256(key), scopes: scope.split('|'), admin: scope.split('|').includes('*') };
+    });
 
 if (!API_KEYS.length) {
-    console.error('Falta API_KEYS (formato: sistema:clave,otro:clave). El servicio no arranca sin claves.');
+    console.error('Falta API_KEYS. El servicio no arranca sin claves.');
     process.exit(1);
-}
-
-// ---------- WhatsApp ----------
-
-const baileysLogger = pino({ level: env.LOG_LEVEL || 'warn' });
-let sock = null;
-let status = 'connecting'; // connecting | qr | connected | disconnected
-let qr = null;
-let reconnectDelay = 3000;
-let manualLogout = false;
-
-async function connect() {
-    mkdirSync(SESSION_DIR, { recursive: true });
-    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-
-    sock = makeWASocket({
-        auth: state,
-        logger: baileysLogger,
-        browser: Browsers.ubuntu('Chrome'),
-        markOnlineOnConnect: false,
-        syncFullHistory: false,
-        generateHighQualityLinkPreview: false,
-        fireInitQueries: false,
-        emitOwnEvents: false,
-        getMessage: async () => undefined,
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (update.qr) {
-            qr = update.qr;
-            status = 'qr';
-            log('Escanea este QR con WhatsApp (Dispositivos vinculados):');
-            qrcode.generate(qr, { small: true });
-        }
-
-        if (connection === 'open') {
-            status = 'connected';
-            qr = null;
-            reconnectDelay = 3000;
-            log('WhatsApp conectado');
-        }
-
-        if (connection === 'close') {
-            const code = lastDisconnect?.error?.output?.statusCode;
-            const loggedOut = code === DisconnectReason.loggedOut;
-            const waitingQr = status === 'qr';
-            status = 'disconnected';
-            qr = null;
-
-            // 515: WhatsApp pide reiniciar justo después de escanear el QR; hay que
-            // reconectar al instante o el teléfono cancela la vinculación.
-            let delay = reconnectDelay;
-            if (code === DisconnectReason.restartRequired) {
-                delay = 0;
-            } else if (loggedOut || waitingQr) {
-                delay = reconnectDelay = 3000; // sin espera creciente mientras se muestra el QR
-            } else {
-                reconnectDelay = Math.min(reconnectDelay * 2, 60000);
-            }
-
-            if (loggedOut) {
-                log('Sesión cerrada por WhatsApp. Hay que escanear el QR otra vez.');
-                if (!manualLogout) alert('logged_out');
-                manualLogout = false;
-            } else if (delay) {
-                log(`Conexión cerrada (código ${code}). Reintento en ${delay / 1000}s`);
-            }
-
-            setTimeout(() => {
-                if (loggedOut) clearSession();
-                connect().catch(onConnectError);
-            }, delay);
-        }
-    });
-}
-
-// Borra el contenido (la carpeta es un volumen montado y no se puede eliminar)
-function clearSession() {
-    for (const file of readdirSync(SESSION_DIR)) {
-        rmSync(join(SESSION_DIR, file), { recursive: true, force: true });
-    }
-}
-
-function onConnectError(err) {
-    log('Error al conectar:', err.message);
-    setTimeout(() => connect().catch(onConnectError), reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 60000);
-}
-
-function alert(event) {
-    if (!ALERT_WEBHOOK_URL) return;
-    fetch(ALERT_WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ service: 'whatsapp-notify', event, at: new Date().toISOString() }),
-        signal: AbortSignal.timeout(10000),
-    }).catch((err) => log('No se pudo enviar el aviso:', err.message));
-}
-
-// ---------- Cola de envío ----------
-
-const queue = [];
-let queueBytes = 0;
-const recent = new Map(); // número -> marcas de tiempo del último minuto
-
-function overRecipientLimit(number, adding) {
-    const cutoff = Date.now() - 60000;
-    const stamps = (recent.get(number) || []).filter((t) => t > cutoff);
-    recent.set(number, stamps);
-    return stamps.length + adding > PER_RECIPIENT_PER_MIN;
-}
-
-async function worker() {
-    for (;;) {
-        if (!queue.length || status !== 'connected') {
-            await sleep(1000);
-            continue;
-        }
-
-        const job = queue[0];
-        try {
-            await sock.sendMessage(`${job.to}@s.whatsapp.net`, job.content);
-            log(`Enviado a ${job.to} (${job.from})`);
-            queue.shift();
-            queueBytes -= job.bytes;
-        } catch (err) {
-            job.tries++;
-            if (job.tries > MAX_RETRIES) {
-                log(`Descartado a ${job.to} (${job.from}) tras ${job.tries} intentos: ${err.message}`);
-                queue.shift();
-                queueBytes -= job.bytes;
-            } else {
-                log(`Fallo a ${job.to}, reintento ${job.tries}: ${err.message}`);
-                await sleep(5000 * job.tries);
-            }
-        }
-
-        // Pausa con algo de azar para no enviar a ritmo de bot
-        await sleep(SEND_INTERVAL_MS * (0.75 + Math.random() * 0.5));
-    }
-}
-
-// ---------- HTTP ----------
-
-function send(res, code, body) {
-    const data = typeof body === 'string' ? body : JSON.stringify(body);
-    res.writeHead(code, {
-        'Content-Type': typeof body === 'string' ? 'text/plain; charset=utf-8' : 'application/json',
-    });
-    res.end(data);
 }
 
 function authenticate(req) {
     const given = req.headers['x-api-key'];
-    if (typeof given !== 'string' || !given) return null;
+    if (typeof given !== 'string' || !given) throw new HttpError(401, 'Falta el header X-API-Key');
     const hash = sha256(given);
     let match = null;
     for (const k of API_KEYS) {
-        if (timingSafeEqual(hash, k.hash)) match = k.name;
+        if (timingSafeEqual(hash, k.hash)) match = k;
     }
+    if (!match) throw new HttpError(401, 'X-API-Key inválida');
     return match;
+}
+
+const canUse = (key, id) =>
+    key.scopes.some((p) => p === '*' || p === id || (p.endsWith('*') && id.startsWith(p.slice(0, -1))));
+
+function send(res, code, body) {
+    const text = typeof body === 'string';
+    res.writeHead(code, { 'Content-Type': text ? 'text/plain; charset=utf-8' : 'application/json' });
+    res.end(text ? body : JSON.stringify(body));
 }
 
 function readJson(req) {
@@ -205,49 +57,51 @@ function readJson(req) {
         req.on('data', (chunk) => {
             size += chunk.length;
             if (size > BODY_LIMIT) {
-                reject(Object.assign(new Error('El cuerpo supera 5 MB'), { code: 413 }));
+                reject(new HttpError(413, 'El cuerpo supera 5 MB'));
                 req.destroy();
                 return;
             }
             chunks.push(chunk);
         });
         req.on('end', () => {
+            if (!size) return resolve({});
             try {
                 resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
             } catch {
-                reject(Object.assign(new Error('JSON inválido'), { code: 400 }));
+                reject(new HttpError(400, 'JSON inválido'));
             }
         });
         req.on('error', reject);
     });
 }
 
-function normalizeNumber(value) {
-    const digits = String(value).replace(/@s\.whatsapp\.net$/, '').replace(/[\s+\-()]/g, '');
-    return /^\d{8,15}$/.test(digits) ? digits : null;
+// Acepta un número con código de país o el "from" de un mensaje entrante
+function toJid(value) {
+    const raw = String(value).trim();
+    if (/^\d{5,20}@lid$/.test(raw)) return raw;
+    const digits = raw.replace(/@s\.whatsapp\.net$/, '').replace(/[\s+\-()]/g, '');
+    return /^\d{8,15}$/.test(digits) ? `${digits}@s.whatsapp.net` : null;
 }
 
-async function handleNotify(req, res, from) {
+async function notify(req, session, key) {
     const body = await readJson(req);
     const text = typeof body.text === 'string' ? body.text.trim() : '';
     const doc = body.document;
 
-    const numbers = (Array.isArray(body.to) ? body.to : [body.to]).map(normalizeNumber);
-    if (!numbers.length || numbers.includes(null)) {
-        return send(res, 400, { error: '"to" debe ser un número (o lista) de 8 a 15 dígitos con código de país' });
+    const jids = (Array.isArray(body.to) ? body.to : [body.to]).map(toJid);
+    if (!jids.length || jids.includes(null)) {
+        throw new HttpError(400, '"to" debe ser un número (o lista) de 8 a 15 dígitos con código de país');
     }
-    if (!text && !doc) {
-        return send(res, 400, { error: 'Falta "text" o "document"' });
-    }
+    if (!text && !doc) throw new HttpError(400, 'Falta "text" o "document"');
 
     let content = { text };
     let bytes = 0;
     if (doc) {
         if (typeof doc.base64 !== 'string' || !doc.fileName) {
-            return send(res, 400, { error: '"document" necesita "base64" y "fileName"' });
+            throw new HttpError(400, '"document" necesita "base64" y "fileName"');
         }
         const buffer = Buffer.from(doc.base64.replace(/^data:.*?;base64,/, ''), 'base64');
-        if (!buffer.length) return send(res, 400, { error: '"document.base64" no es válido' });
+        if (!buffer.length) throw new HttpError(400, '"document.base64" no es válido');
         bytes = buffer.length;
         content = {
             document: buffer,
@@ -257,73 +111,74 @@ async function handleNotify(req, res, from) {
         };
     }
 
-    if (queue.length + numbers.length > QUEUE_MAX || queueBytes + bytes * numbers.length > QUEUE_MAX_BYTES) {
-        return send(res, 429, { error: 'Cola llena, intenta más tarde' });
+    if (['unlinked', 'qr'].includes(session.status)) {
+        throw new HttpError(409, `La sesión "${session.id}" no tiene un número vinculado`);
     }
-    const unique = [...new Set(numbers)];
-    for (const n of unique) {
-        const adding = numbers.filter((x) => x === n).length;
-        if (overRecipientLimit(n, adding)) {
-            return send(res, 429, { error: `Demasiados mensajes para ${n} en el último minuto` });
-        }
-    }
-
-    for (const to of numbers) {
-        recent.get(to).push(Date.now());
-        queue.push({ to, content, bytes, from, tries: 0 });
-        queueBytes += bytes;
-    }
-    send(res, 202, { queued: numbers.length, pending: queue.length, status });
+    wa.enqueue(session, jids, content, bytes, key.name);
+    return { queued: jids.length, pending: session.queue.length, status: session.status };
 }
 
-async function handleLogout(res) {
-    manualLogout = true;
-    try {
-        if (status === 'connected') await sock.logout();
-        else sock?.end(new Error('logout'));
-    } catch (err) {
-        log('Error al cerrar sesión:', err.message);
+async function route(req, res) {
+    const url = new URL(req.url, 'http://localhost');
+    const [root, id, action, extra] = url.pathname.split('/').filter(Boolean);
+    const method = req.method;
+
+    if (method === 'GET' && root === 'status' && !id) {
+        const all = wa.list();
+        return send(res, 200, { ok: true, sessions: all.length, connected: all.filter((s) => s.status === 'connected').length });
     }
-    clearSession();
-    send(res, 200, { ok: true, message: 'Sesión cerrada. Nuevo QR disponible en /qr en unos segundos' });
+    if (root !== 'sessions' || extra) throw new HttpError(404, 'No encontrado');
+
+    const key = authenticate(req);
+
+    if (!id) {
+        if (method !== 'GET') throw new HttpError(404, 'No encontrado');
+        return send(res, 200, wa.list().filter((s) => canUse(key, s.id)).map(wa.info));
+    }
+    if (!canUse(key, id)) throw new HttpError(403, `Esta clave no puede usar la sesión "${id}"`);
+
+    if (!action) {
+        if (method === 'GET') return send(res, 200, wa.info(wa.get(id)));
+        if (!key.admin) throw new HttpError(403, 'Solo una clave de administrador puede crear o eliminar sesiones');
+        if (method === 'PUT') return send(res, 200, wa.info(wa.upsert(id, await readJson(req))));
+        if (method === 'DELETE') {
+            await wa.remove(wa.get(id));
+            return send(res, 200, { ok: true });
+        }
+        throw new HttpError(404, 'No encontrado');
+    }
+
+    const session = wa.get(id);
+    if (method === 'POST' && action === 'notify') return send(res, 202, await notify(req, session, key));
+    if (method === 'POST' && action === 'logout') {
+        await wa.logout(session);
+        return send(res, 200, { ok: true, status: session.status });
+    }
+    if (method === 'GET' && action === 'qr') {
+        const result = await wa.getQr(session);
+        if (url.searchParams.get('format') !== 'text') return send(res, 200, result);
+        if (!result.qr) return send(res, 200, `Estado: ${result.status}\n`);
+        return qrcode.generate(result.qr, { small: true }, (ascii) => send(res, 200, ascii + '\n'));
+    }
+    throw new HttpError(404, 'No encontrado');
 }
 
-const server = createServer(async (req, res) => {
-    const route = `${req.method} ${req.url.split('?')[0]}`;
-    try {
-        if (route === 'GET /status') {
-            return send(res, 200, { status, pending: queue.length });
-        }
-
-        if (!['POST /notify', 'GET /qr', 'POST /logout'].includes(route)) {
-            return send(res, 404, { error: 'No encontrado' });
-        }
-        const from = authenticate(req);
-        if (!from) return send(res, 401, { error: 'X-API-Key inválida o ausente' });
-
-        if (route === 'POST /notify') return await handleNotify(req, res, from);
-        if (route === 'POST /logout') return await handleLogout(res);
-
-        // GET /qr
-        if (status === 'connected') return send(res, 200, { status });
-        if (!qr) return send(res, 404, { error: 'Aún no hay QR, intenta en unos segundos' });
-        qrcode.generate(qr, { small: true }, (ascii) => send(res, 200, ascii + '\n'));
-    } catch (err) {
-        if (!res.headersSent) send(res, err.code >= 400 ? err.code : 500, { error: err.message });
-    }
+const server = createServer((req, res) => {
+    route(req, res).catch((err) => {
+        const known = err instanceof HttpError;
+        if (!known) log('Error interno:', err);
+        if (!res.headersSent) send(res, known ? err.code : 500, { error: known ? err.message : 'Error interno' });
+    });
 });
 
 function shutdown() {
     log('Apagando...');
     server.close();
-    try {
-        sock?.end(undefined);
-    } catch {}
+    wa.shutdown();
     setTimeout(() => process.exit(0), 500);
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 server.listen(PORT, () => log(`whatsapp-notify escuchando en :${PORT} (claves: ${API_KEYS.map((k) => k.name).join(', ')})`));
-connect().catch(onConnectError);
-worker();
+wa.loadAll();
