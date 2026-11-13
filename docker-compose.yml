@@ -1,19 +1,35 @@
-# docker-compose.yml
-version: '3.8'
-
 services:
-  whatsapp-api:
+  whatsapp-notify:
     build: .
-    env_file:
-      - .env
-    ports:
-      - "3080:8080" # puerto HTTP externo: 3080 , interno: 8080
-    volumes:
-      - ./session:/app/session  # Persistencia de credenciales
+    container_name: whatsapp-notify
+    user: "1001:1001" # dueño de ./session en el host
+    env_file: .env
     environment:
-      - NODE_ENV=production
       - SESSION_DIR=/app/session
-      - LOGOUT_SECRET=${LOGOUT_SECRET}
-      - URL_API_N8N=${URL_API_N8N}
-      - AUTHORIZATION_N8N=${AUTHORIZATION_N8N}
+    volumes:
+      - ./session:/app/session
+    networks:
+      - repanet
+    # Sin "ports": solo accesible desde la red Docker repanet
+    mem_limit: 192m
+    memswap_limit: 256m
+    cpus: 0.5
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/status"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+networks:
+  repanet:
+    external: true

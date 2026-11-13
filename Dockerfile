@@ -1,24 +1,13 @@
-# Dockerfile
-FROM node:20-alpine
-
-# Instalar git y otras dependencias del sistema necesarias
-RUN apk add --no-cache git
-
+FROM node:20-alpine AS build
 WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci --omit=dev
 
-# Copiar package.json primero para aprovechar caché
-COPY package*.json ./
-
-# Instalar TODAS las dependencias necesarias
-RUN npm install && npm cache clean --force
-
-# Copiar el código fuente (sin node_modules local)
-COPY . .
-
-# Crear directorio de sesión (aunque se montará desde fuera)
-RUN mkdir -p /app/session
-
+FROM node:20-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/node_modules ./node_modules
+COPY package.json ./
+COPY src ./src
 EXPOSE 8080
-
-# Ejecutar la aplicación (las dependencias ya están instaladas)
-CMD ["npm", "start"]
+CMD ["node", "--max-old-space-size=96", "--max-semi-space-size=2", "src/index.js"]

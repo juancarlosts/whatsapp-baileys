@@ -1,738 +1,329 @@
-// src/index.js
-const express = require('express');
-const {
-    makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    fetchLatestBaileysVersion
-} = require('@whiskeysockets/baileys');
-const QRCode = require('qrcode-terminal');
-const path = require('path');
-const fs = require('fs');
-const fetch = require('node-fetch').default;
+// Servicio de notificaciones por WhatsApp (solo envío).
+import { createServer } from 'node:http';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } from 'baileys';
+import pino from 'pino';
+import qrcode from 'qrcode-terminal';
 
-const app = express();
-const PORT = process.env.PORT || 8080;
-const SESSION_DIR = process.env.SESSION_DIR || './session';
+const env = process.env;
+const PORT = Number(env.PORT) || 8080;
+const SESSION_DIR = env.SESSION_DIR || './session';
+const SEND_INTERVAL_MS = Number(env.SEND_INTERVAL_MS) || 4000;
+const QUEUE_MAX = Number(env.QUEUE_MAX) || 200;
+const QUEUE_MAX_BYTES = (Number(env.QUEUE_MAX_MB) || 20) * 1024 * 1024;
+const PER_RECIPIENT_PER_MIN = Number(env.PER_RECIPIENT_PER_MIN) || 5;
+const ALERT_WEBHOOK_URL = env.ALERT_WEBHOOK_URL || '';
+const BODY_LIMIT = 5 * 1024 * 1024;
+const MAX_RETRIES = 2;
 
-const incomingMessages = [];
-const { unlinkSync, readdirSync } = require('fs');
+const sha256 = (s) => createHash('sha256').update(s).digest();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const log = (...a) => console.log(new Date().toISOString(), ...a);
 
-// Importar el sistema de menús
-//const menuHandler = require('./menuHandler');
+// API_KEYS="sistema:clave,otro:clave"
+const API_KEYS = (env.API_KEYS || '')
+    .split(',')
+    .map((p) => p.trim().split(':'))
+    .filter(([name, key]) => name && key)
+    .map(([name, key]) => ({ name, hash: sha256(key) }));
 
-// Importar el sistema de menús
-const menuHandler = require('./menuHandlerPersona');
-
-// Asegurar que el directorio de sesión exista
-if (!fs.existsSync(SESSION_DIR)) {
-    fs.mkdirSync(SESSION_DIR, { recursive: true });
+if (!API_KEYS.length) {
+    console.error('Falta API_KEYS (formato: sistema:clave,otro:clave). El servicio no arranca sin claves.');
+    process.exit(1);
 }
 
-let sock = null;
-let qrCode = null;
-let connectionStatus = 'disconnected';
+// ---------- WhatsApp ----------
 
-async function connectToWhatsApp() {
+const baileysLogger = pino({ level: env.LOG_LEVEL || 'warn' });
+let sock = null;
+let status = 'connecting'; // connecting | qr | connected | disconnected
+let qr = null;
+let reconnectDelay = 3000;
+let manualLogout = false;
+
+async function connect() {
+    mkdirSync(SESSION_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
-    const { version } = await fetchLatestBaileysVersion();
-
     sock = makeWASocket({
-        version,
-        printQRInTerminal: false,
         auth: state,
-        browser: ['Baileys API', 'Chrome', '1.0'],
-        markOnlineOnConnect: true,
-    });
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        console.log('🔄 Estado de conexión actualizado:', update);
-
-        if (qr) {
-            qrCode = qr;
-            console.log('QR recibido. Escanéalo con WhatsApp.');
-            QRCode.generate(qr, { small: true });
-        }
-
-        if (connection === 'connecting') {
-            connectionStatus = 'connecting';
-            console.log('Conectando...');
-        }
-
-        if (connection === 'open') {
-            connectionStatus = 'connected';
-            qrCode = null;
-            console.log('Conexión abierta. ¡Autenticado!');
-        }
-
-        if (connection === 'close') {
-            connectionStatus = 'disconnected';
-            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('Conexión cerrada. Reconectando:', shouldReconnect);
-            if (shouldReconnect) {
-                setTimeout(connectToWhatsApp, 3000);
-            }
-        }
+        logger: baileysLogger,
+        browser: Browsers.ubuntu('Chrome'),
+        markOnlineOnConnect: false,
+        syncFullHistory: false,
+        generateHighQualityLinkPreview: false,
+        fireInitQueries: false,
+        emitOwnEvents: false,
+        getMessage: async () => undefined,
     });
 
     sock.ev.on('creds.update', saveCreds);
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
 
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return; // Solo mensajes reales
-
-        for (const msg of messages) {
-            if (!msg.key.fromMe && msg.message) {
-                const contact = msg.key.remoteJid; // Quién envió el mensaje
-
-                // Extraer el contenido real del mensaje
-                // A veces los mensajes vienen envueltos en viewOnceMessage, ephemeralMessage, etc.
-                let actualMessage = msg.message;
-                
-                // Desempaquetar mensajes especiales
-                if (msg.message.viewOnceMessage) {
-                    actualMessage = msg.message.viewOnceMessage.message;
-                }
-                if (msg.message.ephemeralMessage) {
-                    actualMessage = msg.message.ephemeralMessage.message;
-                }
-                if (msg.message.viewOnceMessageV2) {
-                    actualMessage = msg.message.viewOnceMessageV2.message;
-                }
-                if (msg.message.documentWithCaptionMessage) {
-                    actualMessage = msg.message.documentWithCaptionMessage.message;
-                }
-
-                // Ignorar mensajes del sistema/protocolo (borrar mensaje, editar, etc.)
-                if (actualMessage.protocolMessage) {
-                    console.log('🔇 Mensaje del sistema ignorado (protocolMessage)');
-                    continue; // Saltar este mensaje
-                }
-
-                // Extraer texto o caption
-                let body = '';
-                let messageType = 'text';
-
-                // Texto simple
-                if (actualMessage.conversation) {
-                    body = actualMessage.conversation;
-                    messageType = 'text';
-                }
-                // Texto extendido (con formato, enlaces, respuestas, etc.)
-                else if (actualMessage.extendedTextMessage?.text) {
-                    body = actualMessage.extendedTextMessage.text;
-                    messageType = 'text';
-                }
-                // Imagen
-                else if (actualMessage.imageMessage) {
-                    body = actualMessage.imageMessage.caption || '[Imagen recibida]';
-                    messageType = 'image';
-                }
-                // Video
-                else if (actualMessage.videoMessage) {
-                    body = actualMessage.videoMessage.caption || '[Video recibido]';
-                    messageType = 'video';
-                }
-                // Audio
-                else if (actualMessage.audioMessage) {
-                    const seconds = actualMessage.audioMessage.seconds || 0;
-                    body = `[Audio recibido - ${seconds}s]`;
-                    messageType = 'audio';
-                }
-                // Nota de voz (PTT - Push To Talk)
-                else if (actualMessage.audioMessage?.ptt) {
-                    const seconds = actualMessage.audioMessage.seconds || 0;
-                    body = `[Nota de voz - ${seconds}s]`;
-                    messageType = 'ptt';
-                }
-                // Documento
-                else if (actualMessage.documentMessage) {
-                    const fileName = actualMessage.documentMessage.fileName || 'sin nombre';
-                    const caption = actualMessage.documentMessage.caption || '';
-                    body = caption ? `${caption} [Documento: ${fileName}]` : `[Documento: ${fileName}]`;
-                    messageType = 'document';
-                }
-                // Sticker
-                else if (actualMessage.stickerMessage) {
-                    body = '[Sticker recibido]';
-                    messageType = 'sticker';
-                }
-                // Contacto
-                else if (actualMessage.contactMessage) {
-                    const contactName = actualMessage.contactMessage.displayName || 'Desconocido';
-                    body = `[Contacto compartido: ${contactName}]`;
-                    messageType = 'contact';
-                }
-                // Ubicación
-                else if (actualMessage.locationMessage) {
-                    const lat = actualMessage.locationMessage.degreesLatitude;
-                    const lng = actualMessage.locationMessage.degreesLongitude;
-                    body = `[Ubicación: ${lat}, ${lng}]`;
-                    messageType = 'location';
-                }
-                // Ubicación en vivo
-                else if (actualMessage.liveLocationMessage) {
-                    body = '[Ubicación en vivo compartida]';
-                    messageType = 'liveLocation';
-                }
-                // Reacción a mensaje
-                else if (actualMessage.reactionMessage) {
-                    const emoji = actualMessage.reactionMessage.text || '👍';
-                    body = `[Reacción: ${emoji}]`;
-                    messageType = 'reaction';
-                }
-                // Mensaje de producto/catálogo
-                else if (actualMessage.productMessage) {
-                    body = '[Producto compartido]';
-                    messageType = 'product';
-                }
-                // Lista de opciones
-                else if (actualMessage.listMessage) {
-                    body = actualMessage.listMessage.description || '[Lista de opciones]';
-                    messageType = 'list';
-                }
-                // Botones
-                else if (actualMessage.buttonsMessage) {
-                    body = actualMessage.buttonsMessage.contentText || '[Mensaje con botones]';
-                    messageType = 'buttons';
-                }
-                // Plantilla con botones
-                else if (actualMessage.templateMessage) {
-                    body = '[Mensaje de plantilla]';
-                    messageType = 'template';
-                }
-                // GIF
-                else if (actualMessage.videoMessage?.gifPlayback) {
-                    body = actualMessage.videoMessage.caption || '[GIF recibido]';
-                    messageType = 'gif';
-                }
-                // Mensaje de llamada
-                else if (actualMessage.call) {
-                    body = '[Llamada entrante]';
-                    messageType = 'call';
-                }
-                // Si no se reconoce el tipo
-                else {
-                    // Log para debug
-                    console.log('⚠️  Tipo de mensaje no reconocido:', Object.keys(actualMessage));
-                    body = '[Mensaje no soportado]';
-                    messageType = 'unsupported';
-                }
-
-                const messageObj = {
-                    id: msg.key.id,
-                    from: contact,
-                    body: body,
-                    timestamp: msg.messageTimestamp?.toString() || Date.now().toString(),
-                    type: messageType,
-                    read: false // Nuevo campo para marcar si fue leído
-                };
-
-                incomingMessages.push(messageObj);
-                console.log(`📩 Nuevo mensaje de ${contact} [${messageType}]: ${body}`);
-                
-                // Sistema de respuesta automática con menús (solo para mensajes de texto)
-                if (messageType === 'text' && body && !body.startsWith('[')) {
-                    try {
-                        // Procesar el mensaje con el sistema de menús (AWAIT porque es async)
-                        const menuResponse = await menuHandler.processUserResponse(contact, body);
-                        
-                        if (menuResponse) {
-                            // Verificar si la respuesta incluye una foto
-                            if (typeof menuResponse === 'object' && menuResponse.mensaje) {
-                                // Si hay foto, enviar primero la foto con el mensaje como caption
-                                if (menuResponse.photo) {
-                                    try {
-                                        console.log(`📸 Enviando foto desde: ${menuResponse.photo}`);
-                                        const imageResponse = await fetch(menuResponse.photo);
-                                        if (imageResponse.ok) {
-                                            const imageBuffer = await imageResponse.buffer();
-                                            await sock.sendMessage(contact, {
-                                                image: imageBuffer,
-                                                caption: menuResponse.mensaje
-                                            });
-                                            console.log(`📸 Foto enviada con éxito a ${contact}`);
-                                        } else {
-                                            // Si falla la foto, enviar solo el texto
-                                            console.warn(`⚠️ No se pudo descargar la foto, enviando solo texto`);
-                                            await sock.sendMessage(contact, { text: menuResponse.mensaje });
-                                        }
-                                    } catch (photoError) {
-                                        console.error(`❌ Error al enviar foto: ${photoError.message}`);
-                                        // Si falla la foto, enviar solo el texto
-                                        await sock.sendMessage(contact, { text: menuResponse.mensaje });
-                                    }
-                                } else {
-                                    // No hay foto, enviar solo el mensaje
-                                    await sock.sendMessage(contact, { text: menuResponse.mensaje });
-                                }
-                            } else {
-                                // Respuesta simple (string)
-                                await sock.sendMessage(contact, { text: menuResponse });
-                            }
-                            
-                            await sock.readMessages([msg.key]); // Marcar como leído después de responder
-                            console.log(`🤖 Respuesta de menú enviada a ${contact}`);
-                        }
-                    } catch (menuError) {
-                        console.error('⚠️  Error en sistema de menús:', menuError.message);
-                        console.error('Stack trace:', menuError.stack);
-                    }
-                }
-            }
+        if (update.qr) {
+            qr = update.qr;
+            status = 'qr';
+            log('Escanea este QR con WhatsApp (Dispositivos vinculados):');
+            qrcode.generate(qr, { small: true });
         }
-    });
-}
 
-// Endpoints de la API
-app.get('/qr', (req, res) => {
-    if (qrCode) {
-        res.json({ qr: qrCode });
-    } else if (connectionStatus === 'connected') {
-        res.json({ status: 'authenticated' });
-    } else {
-        res.status(404).json({ error: 'No QR disponible. Intentando reconectar...' });
-    }
-});
+        if (connection === 'open') {
+            status = 'connected';
+            qr = null;
+            reconnectDelay = 3000;
+            log('WhatsApp conectado');
+        }
 
-app.post('/send', express.json(), async (req, res) => {
-    const { to, message } = req.body;
-    if (!to || !message) {
-        return res.status(400).json({ error: 'Faltan parámetros: to, message' });
-    }
+        if (connection === 'close') {
+            const code = lastDisconnect?.error?.output?.statusCode;
+            const loggedOut = code === DisconnectReason.loggedOut;
+            const waitingQr = status === 'qr';
+            status = 'disconnected';
+            qr = null;
 
-    if (connectionStatus !== 'connected') {
-        return res.status(503).json({ error: 'WhatsApp no está conectado' });
-    }
-
-    try {
-        const id = to.endsWith('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
-        await sock.sendMessage(id, { text: message });
-        console.log(`Mensaje enviado a ${to}`);
-        res.json({ success: true, to, message });
-
-        
-    } catch (error) {
-        console.error('Error al enviar mensaje:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.get('/status', (req, res) => {
-    console.log('Estado de conexión:', connectionStatus);
-    res.json({ status: connectionStatus });
-});
-
-
-//app.use(express.json({ limit: '10mb' })); 
-// Enviar todos los mensajes (texto e imagen)
-app.post('/send-all', express.json({ limit: '10mb' }), async (req, res) => {
-    const { to, message = '', media, mediaType = 'image' } = req.body;
-
-    // Validación básica
-    if (!to) {
-        return res.status(400).json({ error: 'El campo "to" (número) es obligatorio.' });
-    }
-    if (!message && !media) {
-        return res.status(400).json({ error: 'Debe proporcionar "message", "media", o ambos.' });
-    }
-
-    if (connectionStatus !== 'connected') {
-        return res.status(503).json({ error: 'WhatsApp no está conectado.' });
-    }
-
-    // Normalizar el ID de WhatsApp
-    const jid = to.endsWith('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
-
-    try {
-        let mediaBuffer = null;
-        let mediaOptions = {};
-
-        if (media) {
-            // Descargar o decodificar el archivo
-            if (typeof media === 'string') {
-                if (media.startsWith('http')) {
-                    console.log(`📥 Descargando archivo desde: ${media}`);
-                    const response = await fetch(media);
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                    }
-                    mediaBuffer = await response.arrayBuffer(); // o .buffer() en algunos entornos
-                    mediaBuffer = Buffer.from(mediaBuffer);
-                } else if (media.startsWith('data:') || media.length > 100) {
-                    // Asumimos que es base64
-                    const base64Data = media.replace(/^data:.*?;base64,/, '');
-                    mediaBuffer = Buffer.from(base64Data, 'base64');
-                } else {
-                    return res.status(400).json({ error: 'El campo "media" debe ser una URL válida o base64.' });
-                }
+            // 515: WhatsApp pide reiniciar justo después de escanear el QR; hay que
+            // reconectar al instante o el teléfono cancela la vinculación.
+            let delay = reconnectDelay;
+            if (code === DisconnectReason.restartRequired) {
+                delay = 0;
+            } else if (loggedOut || waitingQr) {
+                delay = reconnectDelay = 3000; // sin espera creciente mientras se muestra el QR
             } else {
-                return res.status(400).json({ error: '"media" debe ser una cadena (URL o base64).' });
+                reconnectDelay = Math.min(reconnectDelay * 2, 60000);
             }
 
-            // Validar tamaño (ej. máximo 15 MB)
-            if (mediaBuffer.length > 15 * 1024 * 1024) {
-                return res.status(400).json({ error: 'El archivo excede el límite de 15 MB.' });
+            if (loggedOut) {
+                log('Sesión cerrada por WhatsApp. Hay que escanear el QR otra vez.');
+                if (!manualLogout) alert('logged_out');
+                manualLogout = false;
+            } else if (delay) {
+                log(`Conexión cerrada (código ${code}). Reintento en ${delay / 1000}s`);
             }
 
-            // Determinar tipo de medio
-            const allowedTypes = ['image', 'video', 'document', 'audio'];
-            if (!allowedTypes.includes(mediaType)) {
-                return res.status(400).json({
-                    error: `Tipo de medio inválido. Use: ${allowedTypes.join(', ')}`,
-                    allowed: allowedTypes
-                });
-            }
-
-            mediaOptions = {
-                [mediaType]: mediaBuffer,
-                caption: mediaType === 'image' || mediaType === 'video' ? message : undefined,
-                mimetype: 'application/octet-stream', // Baileys lo detecta automáticamente en muchos casos
-                fileName: `archivo.${mediaType === 'image' ? 'jpg' : mediaType === 'video' ? 'mp4' : 'bin'}`
-            };
-
-            // Si es documento y hay mensaje, se puede usar como descripción (opcional)
-            if (mediaType === 'document' && message) {
-                mediaOptions.caption = message;
-            }
-        }
-
-        // Enviar
-        const sendOptions = media
-            ? mediaOptions
-            : { text: message };
-
-        const result = await sock.sendMessage(jid, sendOptions);
-
-        console.log(`✅ Mensaje enviado a ${to}:`, result.key.id);
-
-        return res.json({
-            success: true,
-            to,
-            type: media ? mediaType : 'text',
-            messageId: result.key.id
-        });
-
-    } catch (error) {
-        console.error('❌ Error al enviar mensaje:', error);
-        return res.status(500).json({
-            error: 'Error interno al enviar el mensaje',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
-        });
-    }
-});
-
-// Endpoint para obtener mensajes entrantes
-app.get('/messages', (req, res) => {
-    const { unreadOnly } = req.query;
-    
-    let messages = incomingMessages;
-    
-    // Filtrar solo no leídos si se solicita
-    if (unreadOnly === 'true') {
-        messages = incomingMessages.filter(msg => !msg.read);
-    }
-    
-    res.json({
-        count: messages.length,
-        total: incomingMessages.length,
-        unread: incomingMessages.filter(msg => !msg.read).length,
-        messages: messages
-    });
-});
-
-// Endpoint para marcar mensajes como leídos
-app.post('/messages/mark-read', express.json(), (req, res) => {
-    const { messageIds } = req.body;
-    
-    if (!messageIds || !Array.isArray(messageIds)) {
-        return res.status(400).json({ 
-            error: 'Se requiere un array de messageIds' 
-        });
-    }
-    
-    let marked = 0;
-    messageIds.forEach(id => {
-        const msg = incomingMessages.find(m => m.id === id);
-        if (msg && !msg.read) {
-            msg.read = true;
-            marked++;
+            setTimeout(() => {
+                if (loggedOut) clearSession();
+                connect().catch(onConnectError);
+            }, delay);
         }
     });
-    
-    res.json({ 
-        success: true, 
-        marked: marked,
-        message: `${marked} mensaje(s) marcado(s) como leído(s)` 
-    });
-});
+}
 
-// Endpoint para responder a un mensaje específico
-app.post('/messages/reply', express.json(), async (req, res) => {
-    const { messageId, message } = req.body;
-    
-    if (!messageId || !message) {
-        return res.status(400).json({ 
-            error: 'Se requiere messageId y message' 
-        });
-    }
-    
-    if (connectionStatus !== 'connected') {
-        return res.status(503).json({ error: 'WhatsApp no está conectado' });
-    }
-    
-    // Buscar el mensaje original
-    const originalMsg = incomingMessages.find(m => m.id === messageId);
-    if (!originalMsg) {
-        return res.status(404).json({ error: 'Mensaje no encontrado' });
-    }
-    
-    try {
-        // Enviar respuesta al remitente
-        await sock.sendMessage(originalMsg.from, { text: message });
-        
-        // Marcar como leído
-        originalMsg.read = true;
-        
-        console.log(`✅ Respuesta enviada a ${originalMsg.from}`);
-        
-        res.json({ 
-            success: true, 
-            to: originalMsg.from,
-            originalMessage: originalMsg.body,
-            reply: message 
-        });
-        
-    } catch (error) {
-        console.error('Error al responder mensaje:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Endpoint para limpiar mensajes leídos
-app.delete('/messages/read', (req, res) => {
-    const beforeCount = incomingMessages.length;
-    const readMessages = incomingMessages.filter(msg => msg.read);
-    
-    // Eliminar mensajes leídos
-    for (let i = incomingMessages.length - 1; i >= 0; i--) {
-        if (incomingMessages[i].read) {
-            incomingMessages.splice(i, 1);
-        }
-    }
-    
-    res.json({ 
-        success: true, 
-        deleted: readMessages.length,
-        remaining: incomingMessages.length,
-        message: `${readMessages.length} mensaje(s) leído(s) eliminado(s)` 
-    });
-});
-
-// Endpoint para limpiar todos los mensajes
-app.delete('/messages', (req, res) => {
-    const count = incomingMessages.length;
-    incomingMessages.length = 0;
-    res.json({ 
-        success: true, 
-        deleted: count,
-        message: 'Todos los mensajes eliminados' 
-    });
-});
-
-// ======= ENDPOINTS DEL SISTEMA DE MENÚS =======
-
-// Endpoint para iniciar un menú manualmente
-app.post('/menu/start', express.json(), async (req, res) => {
-    const { to, menuId = 'MAIN' } = req.body;
-    
-    if (!to) {
-        return res.status(400).json({ error: 'Se requiere el campo "to"' });
-    }
-    
-    if (connectionStatus !== 'connected') {
-        return res.status(503).json({ error: 'WhatsApp no está conectado' });
-    }
-    
-    try {
-        const jid = to.endsWith('@s.whatsapp.net') ? to : `${to}@s.whatsapp.net`;
-        const menuMessage = menuHandler.startMenu(jid, menuId);
-        
-        if (!menuMessage) {
-            return res.status(404).json({ error: 'Menú no encontrado' });
-        }
-        
-        await sock.sendMessage(jid, { text: menuMessage });
-        
-        res.json({
-            success: true,
-            to: jid,
-            menuId,
-            message: 'Menú iniciado correctamente'
-        });
-    } catch (error) {
-        console.error('Error al iniciar menú:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// Endpoint para obtener menús disponibles
-app.get('/menu/list', (req, res) => {
-    const menus = Object.keys(menuHandler.MENUS).map(key => {
-        const menu = menuHandler.MENUS[key];
-        return {
-            id: menu.id,
-            title: menu.title,
-            options: Object.keys(menu.options).length
-        };
-    });
-    
-    res.json({
-        count: menus.length,
-        menus
-    });
-});
-
-// Endpoint para obtener estado del menú de un usuario
-app.get('/menu/status/:phoneNumber', (req, res) => {
-    const { phoneNumber } = req.params;
-    const jid = phoneNumber.endsWith('@s.whatsapp.net') 
-        ? phoneNumber 
-        : `${phoneNumber}@s.whatsapp.net`;
-    
-    const isActive = menuHandler.isInActiveMenu(jid);
-    const currentMenu = menuHandler.getCurrentMenu(jid);
-    
-    res.json({
-        phoneNumber,
-        isActive,
-        currentMenu: currentMenu ? {
-            id: currentMenu.id,
-            title: currentMenu.title
-        } : null
-    });
-});
-
-// Endpoint para limpiar estado del menú de un usuario
-app.delete('/menu/clear/:phoneNumber', (req, res) => {
-    const { phoneNumber } = req.params;
-    const jid = phoneNumber.endsWith('@s.whatsapp.net') 
-        ? phoneNumber 
-        : `${phoneNumber}@s.whatsapp.net`;
-    
-    menuHandler.clearConversationState(jid);
-    
-    res.json({
-        success: true,
-        message: 'Estado del menú limpiado',
-        phoneNumber
-    });
-});
-
-// Iniciar
-connectToWhatsApp().catch(console.error);
-
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 API corriendo en http://localhost:${PORT}`);
-});
-
-// Endpoint para cerrar sesión
-app.post('/logout', express.json(), async (req, res) => {
-    console.log('Solicitud de cierre de sesión recibida');
-    
-    // Verificar si la variable de entorno está configurada
-    if (!process.env.LOGOUT_SECRET) {
-        return res.status(500).json({ 
-            error: 'LOGOUT_SECRET no está configurado en el servidor' 
-        });
-    }
-    
-    const { secret } = req.body;
-    
-    // Verificar si se proporcionó el secreto
-    if (!secret) {
-        return res.status(400).json({ 
-            error: 'Se requiere el campo "secret" en el body de la petición' 
-        });
-    }
-    
-    if (secret !== process.env.LOGOUT_SECRET) {
-        return res.status(403).json({ error: 'Secreto inválido' });
-    }
-    try {
-        // 1. Intentar cerrar conexión solo si está conectada
-        if (sock && connectionStatus === 'connected') {
-            try {
-                await sock.logout();
-                console.log('✅ Conexión cerrada correctamente en WhatsApp');
-            } catch (logoutError) {
-                console.log('⚠️  Conexión ya cerrada o error al notificar a WhatsApp:', logoutError.message);
-            }
-        }
-        
-        // 2. Siempre limpiar referencias y estado local
-        sock = null;
-        qrCode = null;
-        connectionStatus = 'disconnected';
-        incomingMessages.length = 0;
-        console.log('🧹 Estado local limpiado');
-
-        // 3. Limpiar archivos de sesión
-        clearSessionDir();
-
-        // 4. Reiniciar conexión para generar nuevo QR
-        setTimeout(() => {
-            console.log('� Iniciando nueva conexión...');
-            connectToWhatsApp().catch(console.error);
-        }, 2000);
-
-        res.json({ 
-            success: true, 
-            message: 'Sesión cerrada y reiniciada. Nuevo QR disponible en /qr en 3-5 segundos' 
-        });
-
-    } catch (error) {
-        console.error('❌ Error al cerrar sesión:', error);
-        
-        // Forzar limpieza aunque haya error
-        sock = null;
-        qrCode = null;
-        connectionStatus = 'disconnected';
-        incomingMessages.length = 0;
-        
-        try {
-            clearSessionDir();
-        } catch (clearError) {
-            console.error('❌ Error al limpiar archivos:', clearError.message);
-        }
-        
-        // Reintentar conexión
-        setTimeout(() => {
-            console.log('🔄 Reintentando conexión después del error...');
-            connectToWhatsApp().catch(console.error);
-        }, 2000);
-        
-        res.json({ 
-            success: true, 
-            message: 'Sesión forzada a reiniciar. Nuevo QR disponible en /qr en unos segundos' 
-        });
-    }
-});
-
-// Función para limpiar el directorio de sesión
-function clearSessionDir() {
-    const files = readdirSync(SESSION_DIR);
-    for (const file of files) {
-        // Evita borrar cosas raras; solo archivos de Baileys
-        if (file !== '.' && file !== '..') {
-            try {
-                unlinkSync(path.join(SESSION_DIR, file));
-                console.log(`🗑️  Eliminado: ${file}`);
-            } catch (err) {
-                console.warn(`⚠️  No se pudo eliminar ${file}:`, err.message);
-            }
-        }
+// Borra el contenido (la carpeta es un volumen montado y no se puede eliminar)
+function clearSession() {
+    for (const file of readdirSync(SESSION_DIR)) {
+        rmSync(join(SESSION_DIR, file), { recursive: true, force: true });
     }
 }
+
+function onConnectError(err) {
+    log('Error al conectar:', err.message);
+    setTimeout(() => connect().catch(onConnectError), reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+}
+
+function alert(event) {
+    if (!ALERT_WEBHOOK_URL) return;
+    fetch(ALERT_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service: 'whatsapp-notify', event, at: new Date().toISOString() }),
+        signal: AbortSignal.timeout(10000),
+    }).catch((err) => log('No se pudo enviar el aviso:', err.message));
+}
+
+// ---------- Cola de envío ----------
+
+const queue = [];
+let queueBytes = 0;
+const recent = new Map(); // número -> marcas de tiempo del último minuto
+
+function overRecipientLimit(number, adding) {
+    const cutoff = Date.now() - 60000;
+    const stamps = (recent.get(number) || []).filter((t) => t > cutoff);
+    recent.set(number, stamps);
+    return stamps.length + adding > PER_RECIPIENT_PER_MIN;
+}
+
+async function worker() {
+    for (;;) {
+        if (!queue.length || status !== 'connected') {
+            await sleep(1000);
+            continue;
+        }
+
+        const job = queue[0];
+        try {
+            await sock.sendMessage(`${job.to}@s.whatsapp.net`, job.content);
+            log(`Enviado a ${job.to} (${job.from})`);
+            queue.shift();
+            queueBytes -= job.bytes;
+        } catch (err) {
+            job.tries++;
+            if (job.tries > MAX_RETRIES) {
+                log(`Descartado a ${job.to} (${job.from}) tras ${job.tries} intentos: ${err.message}`);
+                queue.shift();
+                queueBytes -= job.bytes;
+            } else {
+                log(`Fallo a ${job.to}, reintento ${job.tries}: ${err.message}`);
+                await sleep(5000 * job.tries);
+            }
+        }
+
+        // Pausa con algo de azar para no enviar a ritmo de bot
+        await sleep(SEND_INTERVAL_MS * (0.75 + Math.random() * 0.5));
+    }
+}
+
+// ---------- HTTP ----------
+
+function send(res, code, body) {
+    const data = typeof body === 'string' ? body : JSON.stringify(body);
+    res.writeHead(code, {
+        'Content-Type': typeof body === 'string' ? 'text/plain; charset=utf-8' : 'application/json',
+    });
+    res.end(data);
+}
+
+function authenticate(req) {
+    const given = req.headers['x-api-key'];
+    if (typeof given !== 'string' || !given) return null;
+    const hash = sha256(given);
+    let match = null;
+    for (const k of API_KEYS) {
+        if (timingSafeEqual(hash, k.hash)) match = k.name;
+    }
+    return match;
+}
+
+function readJson(req) {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        let size = 0;
+        req.on('data', (chunk) => {
+            size += chunk.length;
+            if (size > BODY_LIMIT) {
+                reject(Object.assign(new Error('El cuerpo supera 5 MB'), { code: 413 }));
+                req.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on('end', () => {
+            try {
+                resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+            } catch {
+                reject(Object.assign(new Error('JSON inválido'), { code: 400 }));
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
+function normalizeNumber(value) {
+    const digits = String(value).replace(/@s\.whatsapp\.net$/, '').replace(/[\s+\-()]/g, '');
+    return /^\d{8,15}$/.test(digits) ? digits : null;
+}
+
+async function handleNotify(req, res, from) {
+    const body = await readJson(req);
+    const text = typeof body.text === 'string' ? body.text.trim() : '';
+    const doc = body.document;
+
+    const numbers = (Array.isArray(body.to) ? body.to : [body.to]).map(normalizeNumber);
+    if (!numbers.length || numbers.includes(null)) {
+        return send(res, 400, { error: '"to" debe ser un número (o lista) de 8 a 15 dígitos con código de país' });
+    }
+    if (!text && !doc) {
+        return send(res, 400, { error: 'Falta "text" o "document"' });
+    }
+
+    let content = { text };
+    let bytes = 0;
+    if (doc) {
+        if (typeof doc.base64 !== 'string' || !doc.fileName) {
+            return send(res, 400, { error: '"document" necesita "base64" y "fileName"' });
+        }
+        const buffer = Buffer.from(doc.base64.replace(/^data:.*?;base64,/, ''), 'base64');
+        if (!buffer.length) return send(res, 400, { error: '"document.base64" no es válido' });
+        bytes = buffer.length;
+        content = {
+            document: buffer,
+            fileName: String(doc.fileName),
+            mimetype: doc.mimetype || 'application/pdf',
+            caption: text || undefined,
+        };
+    }
+
+    if (queue.length + numbers.length > QUEUE_MAX || queueBytes + bytes * numbers.length > QUEUE_MAX_BYTES) {
+        return send(res, 429, { error: 'Cola llena, intenta más tarde' });
+    }
+    const unique = [...new Set(numbers)];
+    for (const n of unique) {
+        const adding = numbers.filter((x) => x === n).length;
+        if (overRecipientLimit(n, adding)) {
+            return send(res, 429, { error: `Demasiados mensajes para ${n} en el último minuto` });
+        }
+    }
+
+    for (const to of numbers) {
+        recent.get(to).push(Date.now());
+        queue.push({ to, content, bytes, from, tries: 0 });
+        queueBytes += bytes;
+    }
+    send(res, 202, { queued: numbers.length, pending: queue.length, status });
+}
+
+async function handleLogout(res) {
+    manualLogout = true;
+    try {
+        if (status === 'connected') await sock.logout();
+        else sock?.end(new Error('logout'));
+    } catch (err) {
+        log('Error al cerrar sesión:', err.message);
+    }
+    clearSession();
+    send(res, 200, { ok: true, message: 'Sesión cerrada. Nuevo QR disponible en /qr en unos segundos' });
+}
+
+const server = createServer(async (req, res) => {
+    const route = `${req.method} ${req.url.split('?')[0]}`;
+    try {
+        if (route === 'GET /status') {
+            return send(res, 200, { status, pending: queue.length });
+        }
+
+        if (!['POST /notify', 'GET /qr', 'POST /logout'].includes(route)) {
+            return send(res, 404, { error: 'No encontrado' });
+        }
+        const from = authenticate(req);
+        if (!from) return send(res, 401, { error: 'X-API-Key inválida o ausente' });
+
+        if (route === 'POST /notify') return await handleNotify(req, res, from);
+        if (route === 'POST /logout') return await handleLogout(res);
+
+        // GET /qr
+        if (status === 'connected') return send(res, 200, { status });
+        if (!qr) return send(res, 404, { error: 'Aún no hay QR, intenta en unos segundos' });
+        qrcode.generate(qr, { small: true }, (ascii) => send(res, 200, ascii + '\n'));
+    } catch (err) {
+        if (!res.headersSent) send(res, err.code >= 400 ? err.code : 500, { error: err.message });
+    }
+});
+
+function shutdown() {
+    log('Apagando...');
+    server.close();
+    try {
+        sock?.end(undefined);
+    } catch {}
+    setTimeout(() => process.exit(0), 500);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
+server.listen(PORT, () => log(`whatsapp-notify escuchando en :${PORT} (claves: ${API_KEYS.map((k) => k.name).join(', ')})`));
+connect().catch(onConnectError);
+worker();

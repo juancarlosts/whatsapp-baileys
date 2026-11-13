@@ -1,446 +1,94 @@
-# 🤖 WhatsApp API con Baileys + Docker
+# whatsapp-notify
 
-Una API REST sencilla para enviar y recibir mensajes de WhatsApp usando **[Baileys](https://github.com/WhiskeySockets/Baileys)**, empaquetada en **Docker** con persistencia de sesión, soporte para multimedia y gestión de sesiones.
+Servicio mínimo para enviar notificaciones por WhatsApp desde los demás sistemas del servidor. Usa [Baileys](https://github.com/WhiskeySockets/Baileys) y solo envía: no guarda ni responde mensajes entrantes.
 
-> ⚠️ **Advertencia**: Este proyecto **no usa la API oficial de WhatsApp Business (WABA)**. Se conecta a tu cuenta personal mediante el sistema de "Dispositivos vinculados". **No lo uses para spam, marketing masivo ni actividades abusivas**. WhatsApp podría bloquear tu número.
+- Sin puerto público: solo se accede por la red Docker `repanet`, en `http://whatsapp-notify:8080`.
+- Cada sistema usa su propia clave en el header `X-API-Key`.
+- Los envíos pasan por una cola en memoria con pausas entre mensajes.
+- Límite de 192 MB de RAM (usa unos 40 MB en reposo).
 
----
+## Puesta en marcha
 
-## 🌟 Características
-
-- ✅ Autenticación con código QR (una sola vez, gracias a la persistencia)
-- ✅ Envío de mensajes de texto, imágenes, videos, documentos y audio
-- ✅ Recepción y registro de mensajes entrantes con estado de lectura
-- ✅ Sistema de gestión de mensajes (leídos/no leídos)
-- ✅ Responder a mensajes específicos
-- ✅ **Sistema de respuestas automáticas con IA (SGIA)** 🤖✨
-- ✅ **Sistema de búsqueda de personas** (Cédula, Nombres, Placas) 🔍
-- ✅ Integración con API N8N para consultas de datos
-- ✅ Envío automático de fotos en resultados de búsqueda
-- ✅ Soporte para múltiples tipos de mensajes (texto, imagen, video, audio, documentos, ubicaciones, contactos, stickers, etc.)
-- ✅ API REST para integrar con otros servicios
-- ✅ Persistencia de sesión entre reinicios del contenedor
-- ✅ Soporte para Node.js 20+ y Docker
-- ✅ Logs detallados para depuración
-- ✅ Endpoint seguro para cerrar sesión y reconexión
-
----
-
-## 🛠️ Requisitos
-
-- [Docker](https://www.docker.com/)
-- [Docker Compose](https://docs.docker.com/compose/)
-- Node.js 20+ (solo para desarrollo local, no necesario en producción)
-
----
-
-## 🚀 Inicio rápido
-
-1. **Clona el repositorio** (o crea los archivos manualmente):
-   ```bash
-   git clone <tu-repo> whatsapp-api
-   cd whatsapp-api
-   ```
-
-2. **Instala dependencias localmente** (opcional, para generar package-lock.json):
-   ```bash
-   npm install
-   ```
-
-3. **Construye y levanta el contenedor**:
-   ```bash
-   docker-compose up --build
-   ```
-
-4. **Escanea el código QR**:
-   - Observa los logs:
-     ```bash
-     docker-compose logs -f whatsapp-api
-     ```
-   - Escanea el QR con tu app de WhatsApp:
-     `Ajustes → Dispositivos vinculados → Vincular dispositivo`
-
-5. **¡Listo!** Tu API está corriendo en `http://localhost:3080`
-
----
-
-## 📡 Endpoints de la API
-
-### 📤 Enviar mensaje
-
-```http
-POST /send-all
+```bash
+cp .env.example .env        # y poner claves reales: openssl rand -hex 24
+docker compose up -d --build
+docker logs -f whatsapp-notify   # muestra el QR para vincular el número
 ```
 
-**Cuerpo (JSON):**
+En el teléfono: WhatsApp → Dispositivos vinculados → Vincular un dispositivo. La sesión queda guardada en `./session`.
+
+## API
+
+| Método | Ruta | Clave | Descripción |
+|---|---|---|---|
+| `POST` | `/notify` | Sí | Encola un mensaje |
+| `GET` | `/status` | No | Estado de la conexión y mensajes pendientes |
+| `GET` | `/qr` | Sí | QR en texto, si hay que vincular |
+| `POST` | `/logout` | Sí | Cierra la sesión y genera un QR nuevo |
+
+### POST /notify
+
+```bash
+curl -X POST http://whatsapp-notify:8080/notify \
+  -H "X-API-Key: <clave>" -H "Content-Type: application/json" \
+  -d '{"to": "593991234567", "text": "Pedido #1234 confirmado"}'
+```
+
+| Campo | Descripción |
+|---|---|
+| `to` | Número con código de país, solo dígitos. También admite una lista |
+| `text` | Texto del mensaje (o descripción del documento) |
+| `document` | Opcional: `{ "base64": "...", "fileName": "factura.pdf", "mimetype": "application/pdf" }` |
+
+Hace falta `text`, `document` o ambos. El cuerpo no puede pasar de 5 MB.
+
+Respuestas:
+
+| Código | Significado |
+|---|---|
+| `202` | Encolado: `{ "queued": 1, "pending": 1, "status": "connected" }` |
+| `400` | Datos inválidos |
+| `401` | Falta la clave o es incorrecta |
+| `429` | Cola llena o demasiados mensajes al mismo número |
+
+`202` significa que el mensaje entró en la cola, no que ya se entregó. Si WhatsApp está desconectado, la cola espera a que vuelva. La cola vive en memoria: se pierde si el contenedor se reinicia.
+
+### GET /status
 
 ```json
-{
-  "to": "593995707647",
-  "message": "Hola mundo",
-  "media": "https://ejemplo.com/imagen.jpg",
-  "mediaType": "image"
-}
+{ "status": "connected", "pending": 0 }
 ```
 
-**Parámetros:**
-- `to`: número con código de país, sin `+` (ej. `593995707647`)
-- `message` (opcional): texto del mensaje
-- `media` (opcional): URL pública o base64
-- `mediaType` (opcional): `image`, `video`, `document`, `audio` (por defecto: `image`)
-
-### 📥 Ver mensajes entrantes
-
-```http
-GET /messages
-GET /messages?unreadOnly=true
-```
-
-**Respuesta:**
-```json
-{
-  "count": 3,
-  "total": 5,
-  "unread": 3,
-  "messages": [
-    {
-      "id": "ABC123",
-      "from": "593995707647@s.whatsapp.net",
-      "body": "Hola, cómo estás?",
-      "timestamp": "1760477803",
-      "type": "text",
-      "read": false
-    }
-  ]
-}
-```
-
-**Query params:**
-- `unreadOnly=true` (opcional): Devuelve solo mensajes no leídos
-
-### 💬 Responder a un mensaje
-
-```http
-POST /messages/reply
-```
-
-**Cuerpo (JSON):**
-```json
-{
-  "messageId": "ABC123",
-  "message": "Hola! Estoy bien, gracias"
-}
-```
-
-Responde a un mensaje específico y lo marca automáticamente como leído.
-
-### ✅ Marcar mensajes como leídos
-
-```http
-POST /messages/mark-read
-```
-
-**Cuerpo (JSON):**
-```json
-{
-  "messageIds": ["ABC123", "DEF456"]
-}
-```
-
-### 🗑️ Eliminar mensajes leídos
-
-```http
-DELETE /messages/read
-```
-
-Elimina todos los mensajes que han sido marcados como leídos.
-
-### 🧹 Limpiar todos los mensajes
-
-```http
-DELETE /messages
-```
-
-Elimina todos los mensajes (leídos y no leídos).
-
-### 📊 Estado de conexión
-
-```http
-GET /status
-```
-
-Devuelve `connected`, `connecting` o `disconnected`.
-
-### 🔐 Código QR
-
-```http
-GET /qr
-```
-
-Obtiene el código QR para autenticación (si está disponible).
-
-### 🚪 Cerrar sesión
-
-```http
-POST /logout
-```
-
-**Cuerpo (JSON):**
-```json
-{
-  "secret": "tu_secreto_configurado"
-}
-```
-
-Cierra la sesión actual y genera un nuevo QR para reconexión.
-
----
-
-## 🎯 Sistema de Búsqueda de Personas (API N8N)
-
-Sistema unificado para búsquedas de cédulas, nombres y placas vehiculares mediante API N8N.
-
-### 🔍 Tipos de búsqueda disponibles
-
-El bot responde automáticamente cuando el usuario escribe "menu":
-
-```
-1️⃣ Buscar por Nombre
-2️⃣ Buscar por Cédula  
-3️⃣ Buscar por Placa
-0️⃣ Salir
-```
-
-### ⚙️ Configuración requerida
-
-Agrega estas variables en tu archivo `.env`:
-
-```env
-# API N8N para búsqueda de personas
-URL_API_N8N=https://tu-servidor-n8n.com/webhook/persondata
-AUTHORIZATION_N8N=tu_token_de_autorizacion
-```
-
-Y en `docker-compose.yml`:
-
-```yaml
-environment:
-  - URL_API_N8N=${URL_API_N8N}
-  - AUTHORIZATION_N8N=${AUTHORIZATION_N8N}
-```
-
-### 📡 Formato de la API
-
-La API debe responder a:
-
-```
-POST {URL_API_N8N}?type={tipo}&query={valor}
-Headers: persondata: {token}
-```
-
-**Parámetros:**
-- `type=cedula` - Búsqueda por cédula (ej: `query=0104967492`)
-- `type=nombres` - Búsqueda por nombres (ej: `query=Juan Perez`)
-- `type=placa` - Búsqueda por placa (ej: `query=ABB3175`)
-
-**Respuesta esperada:**
-
-```json
-{
-  "data": "👤 Nombre: JUAN PEREZ\n📋 Cédula: 0104967492\n..."
-}
-```
-
-o
-
-```json
-{
-  "mensaje": "👤 Nombre: JUAN PEREZ\n📋 Cédula: 0104967492\n..."
-}
-```
-
-### 📸 Soporte de fotos
-
-Si la respuesta incluye una URL de foto en el formato:
-
-```
-🖼️ Foto: https://ejemplo.com/foto.jpg
-```
-
-El bot enviará automáticamente la imagen junto con los datos (sin mostrar la URL en el mensaje).
-
----
-
-## 🗃️ Persistencia
-
-- Las credenciales de WhatsApp se guardan en `./session/` (gracias al volumen de Docker)
-- Los mensajes entrantes se almacenan en memoria con estado de lectura (se pierden al reiniciar)
-- La sesión persiste entre reinicios del contenedor
-- Estado de mensajes (leído/no leído) se mantiene durante la ejecución
-
----
-
-## 📨 Tipos de mensajes soportados
-
-La API puede recibir y procesar los siguientes tipos de mensajes:
-
-- ✅ **Texto** - Mensajes de texto simple y con formato
-- ✅ **Imágenes** - Con o sin caption
-- ✅ **Videos** - Con o sin caption
-- ✅ **Audio** - Archivos de audio y notas de voz
-- ✅ **Documentos** - PDFs, Word, Excel, etc.
-- ✅ **Stickers** - Stickers animados y estáticos
-- ✅ **Contactos** - Contactos compartidos
-- ✅ **Ubicaciones** - Ubicaciones estáticas y en vivo
-- ✅ **GIFs** - GIFs animados
-- ✅ **Reacciones** - Emojis de reacción a mensajes
-- ⚠️ **Listas y botones** - Soporte básico
-- 🔇 **Mensajes del sistema** - Ignorados automáticamente (mensajes eliminados, editados, etc.)
-
----
-
-## 🔄 Flujo de trabajo recomendado
-
-1. **Consultar mensajes nuevos:**
-   ```bash
-   curl http://localhost:3080/messages?unreadOnly=true
-   ```
-
-2. **Procesar y responder:**
-   ```bash
-   curl -X POST http://localhost:3080/messages/reply \
-     -H "Content-Type: application/json" \
-     -d '{"messageId": "ABC123", "message": "Tu respuesta"}'
-   ```
-
-3. **Limpiar mensajes procesados:**
-   ```bash
-   curl -X DELETE http://localhost:3080/messages/read
-   ```
-
----
-
-## 🧪 Ejemplos de uso
-
-### Enviar texto
+`status` puede ser `connecting`, `qr` (falta escanear), `connected` o `disconnected`.
+
+## Configuración (`.env`)
+
+| Variable | Por defecto | Descripción |
+|---|---|---|
+| `API_KEYS` | (obligatoria) | `sistema:clave,otro:clave` |
+| `SEND_INTERVAL_MS` | `4000` | Pausa media entre envíos |
+| `QUEUE_MAX` | `200` | Máximo de mensajes en cola |
+| `QUEUE_MAX_MB` | `20` | Máximo de MB en documentos en cola |
+| `PER_RECIPIENT_PER_MIN` | `5` | Máximo de mensajes por número y minuto |
+| `LOG_LEVEL` | `warn` | Log de Baileys: `warn`, `error` o `silent` |
+| `ALERT_WEBHOOK_URL` | (vacío) | Recibe un `POST` con `{"event":"logged_out"}` si WhatsApp cierra la sesión |
+
+## Operación
 
 ```bash
-curl -X POST http://localhost:3080/send-all \
-  -H "Content-Type: application/json" \
-  -d '{"to": "593995707647", "message": "¡Hola desde Docker!"}'
+docker logs --tail 50 whatsapp-notify          # ver envíos y errores
+docker stats --no-stream whatsapp-notify       # consumo
+docker exec whatsapp-notify wget -qO- http://127.0.0.1:8080/status
 ```
 
-### Enviar imagen
+Para actualizar Baileys: cambiar la versión en `package.json`, regenerar el lockfile y reconstruir.
 
 ```bash
-curl -X POST http://localhost:3080/send-all \
-  -H "Content-Type: application/json" \
-  -d '{
-    "to": "593995707647",
-    "message": "Mira esta foto",
-    "media": "https://picsum.photos/200",
-    "mediaType": "image"
-  }'
+docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/w -w /w node:20-alpine \
+  npm install --package-lock-only --omit=dev
+docker compose up -d --build
 ```
 
-### Obtener mensajes no leídos
+## Aviso
 
-```bash
-curl http://localhost:3080/messages?unreadOnly=true
-```
-
-### Responder a un mensaje
-
-```bash
-curl -X POST http://localhost:3080/messages/reply \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messageId": "ABC123",
-    "message": "Gracias por tu mensaje!"
-  }'
-```
-
-### Marcar mensajes como leídos
-
-```bash
-curl -X POST http://localhost:3080/messages/mark-read \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messageIds": ["ABC123", "DEF456"]
-  }'
-```
-
-### Eliminar mensajes leídos
-
-```bash
-curl -X DELETE http://localhost:3080/messages/read
-```
-
-### Verificar estado
-
-```bash
-curl http://localhost:3080/status
-```
-
-### Cerrar sesión
-
-```bash
-curl -X POST http://localhost:3080/logout \
-  -H "Content-Type: application/json" \
-  -d '{"secret": "tu_secreto_configurado"}'
-```
-
----
-
-## ⚙️ Configuración
-
-### Variables de entorno
-
-Crea un archivo `.env` en la raíz del proyecto:
-
-```env
-# Seguridad
-LOGOUT_SECRET=tu_secreto_super_seguro_aqui
-
-# SGIA - Sistema de IA (opcional)
-SGIA_SECRET=tu_token_dify
-URL_API_DIFY=https://dify.ejemplo.com/v1
-
-# API N8N - Sistema de búsqueda de personas
-URL_API_N8N=https://n8n.ejemplo.com/webhook/persondata
-AUTHORIZATION_N8N=tu_token_n8n
-```
-
-### Puertos
-
-- Puerto externo: `3080`
-- Puerto interno del contenedor: `8080`
-
----
-
-## 📦 Tecnologías usadas
-
-- **Baileys** v6.7.20 - Cliente no oficial de WhatsApp
-- **Node.js** 20+ - Runtime de JavaScript
-- **Express** - Framework web para la API REST
-- **Docker** y **Docker Compose** - Contenerización
-
----
-
-## ⚠️ Limitaciones conocidas
-
-- Los mensajes enviados muestran una advertencia en el chat:
-  *"Este mensaje no desaparecerá del chat. Es posible que el remitente tenga una versión desactualizada de WhatsApp."*
-  → Esto es normal al usar clientes no oficiales.
-- Los mensajes en memoria se pierden al reiniciar el contenedor
-- La sesión expira si no se usa en ~21 días
-- Soporte limitado para encuestas y algunas funciones avanzadas
-
----
-
-## 📜 Licencia
-
-Este proyecto es de código abierto bajo la licencia MIT.
-
-**Baileys** es mantenido por la comunidad y no está afiliado a WhatsApp Inc.
-
+Baileys no es la API oficial de WhatsApp y el número puede ser bloqueado. Usa un número dedicado a notificaciones y envía solo a quien espera el mensaje.
