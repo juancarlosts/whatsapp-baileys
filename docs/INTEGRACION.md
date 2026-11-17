@@ -252,11 +252,15 @@ Un flujo de n8n puede avisarte por correo si es `sistema` o `gualasoft`, y avisa
 |---|---|---|
 | Mensajes al mismo número | 5 por minuto | `429` |
 | Mensajes en cola por sesión | 200 | `429` |
-| Mensajes por día de una sesión | `dailyLimit` (0 = sin límite) | `429` |
+| Mensajes por día de una sesión | `dailyLimit` (0 = 500), menos durante las 4 semanas de calentamiento: 30, 60, 120, 240 | `429` |
+| Mensajes por hora de una sesión | Un cuarto del límite diario (mínimo 10) | `429` |
+| Chats nuevos por día | La mitad del límite diario, máximo 100 | `429` |
 | Tamaño del cuerpo | 5 MB (documento de ~3.5 MB) | `413` |
 | Sesiones | 10 | `409` al crear |
 
-La cola y el contador diario están en memoria: si el contenedor se reinicia, los mensajes pendientes se pierden y el contador vuelve a cero.
+Las respuestas a quien escribió en las últimas 24 h no consumen estos límites. Los límites vigentes de cada sesión se ven en `estado_sesion(...)`; el detalle está en el [README](../README.md#límites-contra-el-bloqueo).
+
+La cola está en memoria: si el contenedor se reinicia, los mensajes pendientes se pierden. Los contadores sí se conservan.
 
 ## 8. Orden sugerido
 

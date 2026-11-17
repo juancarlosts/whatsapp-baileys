@@ -82,7 +82,9 @@ El `<id>` admite minúsculas, números, `-` y `_` (máximo 40 caracteres).
 
 | Campo | Por defecto | Descripción |
 |---|---|---|
-| `dailyLimit` | `0` | Máximo de mensajes por día (UTC). `0` = sin límite |
+| `dailyLimit` | `0` | Máximo de mensajes por día (hora local). `0` = `DEFAULT_DAILY_LIMIT` |
+| `newChatsLimit` | `0` | Máximo de chats nuevos por día. `0` = la mitad del límite diario, con tope `DEFAULT_NEW_CHATS_LIMIT` |
+| `warmup` | `true` | Calentamiento del número. `false` solo para números con años de uso |
 | `webhook` | `null` | URL que recibe los mensajes entrantes. `null` = se ignoran |
 
 Los campos que no se envían no cambian.
@@ -96,10 +98,31 @@ Los campos que no se envían no cambian.
   "number": "593967964924",
   "pending": 0,
   "sentToday": 2,
-  "dailyLimit": 0,
+  "dailyLimit": 30,
+  "hourlyLimit": 10,
+  "newChatsToday": 1,
+  "newChatsLimit": 15,
+  "warmingUp": true,
+  "linkedAt": "2026-11-12T23:06:01.633Z",
   "webhook": null
 }
 ```
+
+`dailyLimit`, `hourlyLimit` y `newChatsLimit` son los límites vigentes hoy, ya con el calentamiento aplicado.
+
+### Límites contra el bloqueo
+
+| Límite | Valor |
+|---|---|
+| Diario | `dailyLimit` de la sesión, o `DEFAULT_DAILY_LIMIT` |
+| Calentamiento | Las 4 primeras semanas desde que se vinculó el número, el diario no pasa de 30, 60, 120 y 240 (`WARMUP_BASE` y se duplica cada semana) |
+| Por hora | Un cuarto del diario (mínimo 10), en la última hora |
+| Chats nuevos por día | Destinatarios a los que la sesión nunca escribió y que nunca le escribieron |
+
+- Al superar cualquiera, `notify` responde `429` y el mensaje indica cuál.
+- **Las respuestas no consumen límites**: un mensaje a quien escribió en las últimas 24 h siempre sale, y pasa delante de las notificaciones en cola.
+- En las sesiones con webhook, los mensajes entrantes se marcan como leídos tras 1–3 s y cada respuesta muestra "escribiendo…" entre 1 y 8 s según el largo del texto.
+- Los contadores, la fecha de vinculación y los chats conocidos se guardan en `session/<id>.state.json` y sobreviven a los reinicios. Al desvincular el número, el calentamiento empieza de nuevo.
 
 | `status` | Significado |
 |---|---|
@@ -177,6 +200,10 @@ Si la sesión tiene `webhook`, cada mensaje de texto que llega de un chat indivi
 | `QUEUE_MAX` | `200` | Máximo de mensajes en cola por sesión |
 | `QUEUE_MAX_MB` | `20` | Máximo de MB en documentos entre todas las colas |
 | `PER_RECIPIENT_PER_MIN` | `5` | Máximo de mensajes por número y minuto |
+| `DEFAULT_DAILY_LIMIT` | `500` | Límite diario de las sesiones con `dailyLimit` 0 |
+| `DEFAULT_NEW_CHATS_LIMIT` | `100` | Tope de chats nuevos por día de las sesiones con `newChatsLimit` 0 |
+| `WARMUP_BASE` | `30` | Mensajes por día en la primera semana de un número |
+| `TIMEZONE` | `America/Guayaquil` | Zona horaria en la que cambia el día de los contadores |
 | `LOG_LEVEL` | `warn` | Log de Baileys: `warn`, `error` o `silent` |
 | `ALERT_WEBHOOK_URL` | (vacío) | Recibe `{"session":"...","event":"logged_out"}` si WhatsApp cierra una sesión |
 | `WEBHOOK_TOKEN` | (vacío) | Se envía como `X-Webhook-Token` en todos los webhooks |
